@@ -190,6 +190,7 @@ find_package(OptiX REQUIRED)
 # Add the path to the OptiX headers to our include paths.
 include_directories(
   "${OptiX_INCLUDE}"
+  "${OptiX_INCLUDE}/optix_prime"
   )
 
 # Force the perforce plugin off for the SDK.
@@ -320,6 +321,7 @@ add_subdirectory(simplePrime)
 # add_subdirectory(whirligig)
 # add_subdirectory(whitted)
 # add_subdirectory(zoneplate)
+add_subdirectory(octree)
 
 # Our sutil library.  The rules to build it are found in the subdirectory.
 add_subdirectory(sutil)
