@@ -5,9 +5,13 @@
 #include <string>
 
 class ConfigLoader {
-public:
-  ConfigLoader() : objFilename("cow.obj"), imageFilename("output.ppm"), imageWidth(640),
-                   contextType(RTP_CONTEXT_TYPE_CPU), bufferType(RTP_BUFFER_TYPE_HOST) {}
+ public:
+  ConfigLoader()
+      : objFilename("cow.obj"),
+        imageFilename("output.ppm"),
+        imageWidth(640),
+        contextType(RTP_CONTEXT_TYPE_CPU),
+        bufferType(RTP_BUFFER_TYPE_HOST) {}
   std::string objFilename;
   std::string imageFilename;
   int imageWidth;
