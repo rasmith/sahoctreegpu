@@ -12,7 +12,7 @@ class CUDAOctreeRendererer : public RTPSimpleRenderer {
   void render();
 
  private:
-  void traceeOnDevice(const int3* indices, const float3* vertices);
+  void traceOnDevice(const int3* indices, const float3* vertices);
 };
 
 #endif

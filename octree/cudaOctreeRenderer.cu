@@ -91,7 +91,7 @@ void CUDAOctreeRendererer::render() {
                       scene.numTriangles * sizeof(float3),
                       cudaMemcpyHostToDevice));
 
-  simpleTraceOnDevice(d_indices, d_vertices);
+  traceOnDevice(d_indices, d_vertices);
 
   cudaFree(d_indices);
   cudaFree(d_vertices);
