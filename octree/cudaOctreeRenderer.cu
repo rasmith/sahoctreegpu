@@ -3,23 +3,23 @@
 
 #define kEpsilon 1e-18
 
-inline __device__ void updateClosest(const Hit& isect, Hit& closest) {
+inline __device__ void octreeUpdateClosest(const Hit& isect, Hit& closest) {
   closest.t = isect.t;
   closest.triId = isect.triId;
   closest.u = isect.u;
   closest.v = isect.v;
 }
 
-inline __device__ void updateHitBuffer(const Hit& closest, Hit* hitBuf) {
+inline __device__ void octreeUpdateHitBuffer(const Hit& closest, Hit* hitBuf) {
   hitBuf->t = closest.t;
   hitBuf->triId = closest.triId;
   hitBuf->u = closest.u;
   hitBuf->v = closest.v;
 }
 
-inline __device__ bool intersect(const Ray& ray, const int3* indices,
-                                 const float3* vertices, const int triId,
-                                 Hit& isect) {
+inline __device__ bool octreeIntersect(const Ray& ray, const int3* indices,
+                                       const float3* vertices, const int triId,
+                                       Hit& isect) {
   const int3 tri = indices[triId];
   const float3 a = vertices[tri.x];
   const float3 b = vertices[tri.y];
@@ -47,7 +47,7 @@ inline __device__ bool intersect(const Ray& ray, const int3* indices,
   return true;
 }
 
-__global__ void simpleTraceKernel(const Ray* rays, const int3* indices,
+__global__ void octreeTraceKernel(const Ray* rays, const int3* indices,
                                   const float3* vertices, const int rayCount,
                                   const int triCount, Hit* hits) {
   int rayIdx = threadIdx.x + blockIdx.x * blockDim.x;
@@ -62,20 +62,20 @@ __global__ void simpleTraceKernel(const Ray* rays, const int3* indices,
   const Ray& ray = *(rays + rayIdx);
   for (int t = 0; t < triCount; ++t) {  // triangles
     Hit isect;
-    if (intersect(ray, indices, vertices, t, isect)) {
+    if (octreeIntersect(ray, indices, vertices, t, isect)) {
       // printf("intersect!\n");
       if (isect.t < closest.t) {
-        updateClosest(isect, closest);
+        octreeUpdateClosest(isect, closest);
       }
     }
   }
-  updateHitBuffer(closest, (hits + rayIdx));
+  octreeUpdateHitBuffer(closest, (hits + rayIdx));
 }
 
-CUDAOctreeRendererer::CUDAOctreeRendererer(const ConfigLoader& config)
+CUDAOctreeRenderer::CUDAOctreeRenderer(const ConfigLoader& config)
     : RTPSimpleRenderer(config) {}
 
-void CUDAOctreeRendererer::render() {
+void CUDAOctreeRenderer::render() {
   int3* d_indices;
   float3* d_vertices;
   // int rounded_length = nextPow2(length);
@@ -97,14 +97,14 @@ void CUDAOctreeRendererer::render() {
   cudaFree(d_vertices);
 }
 
-void CUDAOctreeRendererer::traceOnDevice(const int3* indices,
-                                         const float3* vertices) {
+void CUDAOctreeRenderer::traceOnDevice(const int3* indices,
+                                       const float3* vertices) {
 
   const int numThreadsPerBlock = 256;
   const int numBlocks =
       (rayBuffer.count() + numThreadsPerBlock - 1) / numThreadsPerBlock;
 
-  simpleTraceKernel << <numBlocks, numThreadsPerBlock>>>
+  octreeTraceKernel << <numBlocks, numThreadsPerBlock>>>
       (rayBuffer.ptr(), indices, vertices, rayBuffer.count(),
        scene.numTriangles, hitBuffer.ptr());
 }

@@ -5,10 +5,10 @@
 #include "rtpSimpleRenderer.h"
 #include "configLoader.h"
 
-class CUDAOctreeRendererer : public RTPSimpleRenderer {
+class CUDAOctreeRenderer : public RTPSimpleRenderer {
  public:
-  CUDAOctreeRendererer(const ConfigLoader& config);
-  virtual ~CUDAOctreeRendererer() {}
+  CUDAOctreeRenderer(const ConfigLoader& config);
+  virtual ~CUDAOctreeRenderer() {}
   void render();
 
  private:

@@ -8,26 +8,26 @@
 #include "image.h"
 
 struct Ray {
-  static const RTPbufferformat format = RTP_BUFFER_FORMAT_RAY_ORIGIN_TMIN_DIRECTION_TMAX;
+  static const RTPbufferformat format =
+      RTP_BUFFER_FORMAT_RAY_ORIGIN_TMIN_DIRECTION_TMAX;
 
   float3 origin;
-  float  tmin;
+  float tmin;
   float3 dir;
-  float  tmax;
+  float tmax;
 };
 
 struct Hit {
   static const RTPbufferformat format = RTP_BUFFER_FORMAT_HIT_T_TRIID_U_V;
 
   float t;
-  int   triId;
+  int triId;
   float u;
   float v;
 };
 
-
 class Renderer {
-public:
+ public:
   Renderer(const ConfigLoader& config);
   virtual ~Renderer();
 
@@ -35,7 +35,7 @@ public:
   virtual void shade();
   void write() { image.write(); }
 
-protected:
+ protected:
   SceneLoader scene;
   RTPcontext context;
   RTPbufferdesc indexDesc;

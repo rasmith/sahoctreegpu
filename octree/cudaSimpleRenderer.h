@@ -6,11 +6,12 @@
 #include "configLoader.h"
 
 class CUDASimpleRenderer : public RTPSimpleRenderer {
-public:
+ public:
   CUDASimpleRenderer(const ConfigLoader& config);
   virtual ~CUDASimpleRenderer() {}
   void render();
-private:
+
+ private:
   void simpleTraceOnDevice(const int3* indices, const float3* vertices);
 };
 
