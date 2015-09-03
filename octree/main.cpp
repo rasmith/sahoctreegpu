@@ -131,6 +131,8 @@ int main(int argc, char** argv) {
         rtype = GPU_RTP_SIMPLE;
       } else if (type.compare("gpu_cuda_simple")) {
         rtype = GPU_CUDA_SIMPLE;
+      } else if (type.compare("gpu_cuda_octree")) {
+        rtype = GPU_CUDA_OCTREE;
       }
     } else {
       std::cerr << "Bad option: '" << arg << "'" << std::endl;
