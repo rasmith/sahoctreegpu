@@ -1,25 +1,28 @@
 #include "cudaOctreeRenderer.h"
 #include <nppdefs.h>
+#include "octree.h"
 
 #define kEpsilon 1e-18
 
-inline __device__ void octreeUpdateClosest(const Hit& isect, Hit& closest) {
+namespace oct {
+
+inline __device__ void updateClosest(const Hit& isect, Hit& closest) {
   closest.t = isect.t;
   closest.triId = isect.triId;
   closest.u = isect.u;
   closest.v = isect.v;
 }
 
-inline __device__ void octreeUpdateHitBuffer(const Hit& closest, Hit* hitBuf) {
+inline __device__ void updateHitBuffer(const Hit& closest, Hit* hitBuf) {
   hitBuf->t = closest.t;
   hitBuf->triId = closest.triId;
   hitBuf->u = closest.u;
   hitBuf->v = closest.v;
 }
 
-inline __device__ bool octreeIntersect(const Ray& ray, const int3* indices,
-                                       const float3* vertices, const int triId,
-                                       Hit& isect) {
+inline __device__ bool intersect(const Ray& ray, const int3* indices,
+                                 const float3* vertices, const int triId,
+                                 Hit& isect) {
   const int3 tri = indices[triId];
   const float3 a = vertices[tri.x];
   const float3 b = vertices[tri.y];
@@ -47,9 +50,9 @@ inline __device__ bool octreeIntersect(const Ray& ray, const int3* indices,
   return true;
 }
 
-__global__ void octreeTraceKernel(const Ray* rays, const int3* indices,
-                                  const float3* vertices, const int rayCount,
-                                  const int triCount, Hit* hits) {
+__global__ void traceKernel(const Ray* rays, const int3* indices,
+                            const float3* vertices, const int rayCount,
+                            const int triCount, Hit* hits) {
   int rayIdx = threadIdx.x + blockIdx.x * blockDim.x;
 
   if (rayIdx >= rayCount) {
@@ -62,14 +65,14 @@ __global__ void octreeTraceKernel(const Ray* rays, const int3* indices,
   const Ray& ray = *(rays + rayIdx);
   for (int t = 0; t < triCount; ++t) {  // triangles
     Hit isect;
-    if (octreeIntersect(ray, indices, vertices, t, isect)) {
+    if (intersect(ray, indices, vertices, t, isect)) {
       // printf("intersect!\n");
       if (isect.t < closest.t) {
-        octreeUpdateClosest(isect, closest);
+        updateClosest(isect, closest);
       }
     }
   }
-  octreeUpdateHitBuffer(closest, (hits + rayIdx));
+  updateHitBuffer(closest, (hits + rayIdx));
 }
 
 CUDAOctreeRenderer::CUDAOctreeRenderer(const ConfigLoader& config)
@@ -123,8 +126,9 @@ void CUDAOctreeRenderer::traceOnDevice(const int3* indices,
 
   build();
 
-  octreeTraceKernel << <numBlocks, numThreadsPerBlock>>>
+  traceKernel << <numBlocks, numThreadsPerBlock>>>
       (rayBuffer.ptr(), indices, vertices, rayBuffer.count(),
        scene.numTriangles, hitBuffer.ptr());
 }
 
+}  // namespace oct

@@ -5,6 +5,8 @@
 #include "rtpSimpleRenderer.h"
 #include "configLoader.h"
 
+namespace oct {
+
 struct BuildOptions {
   enum BuildOptionType {
     BUILD_ON_DEVICE,
@@ -35,4 +37,5 @@ class CUDAOctreeRenderer : public RTPSimpleRenderer {
   BuildOptions buildOptions;
 };
 
+} // namespace oct
 #endif
