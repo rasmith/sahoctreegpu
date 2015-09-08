@@ -103,7 +103,7 @@ void CUDAOctreeRenderer::render() {
 void CUDAOctreeRenderer::buildOnDevice() {}
 
 void CUDAOctreeRenderer::buildFromFile() {
-  OctreeCPU octreeGpu;
+  OctreeGPU octreeGpu;
   octreeGpu.buildFromFile(buildOptions.info);
 }
 
