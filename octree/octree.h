@@ -224,25 +224,19 @@ class Octree {
   typedef typename TypeSelector<DeviceType, HostIntVectorType,
                                 DeviceIntVectorType>::ValueType IntVector;
 
-  __host__ __device__ Octree() {}
+  __host__ Octree() {}
 
   template <Device OtherDeviceType>
-  __host__ __device__ Octree(const Octree<OtherDeviceType> &other) {
-    copyFrom(other);
+  __host__ void copyFrom(const Octree<OtherDeviceType> &other) {
+    m_nodes = other.nodes();
+    m_triangleIds = other.triangleIds();
   }
 
-  template <Device OtherDeviceType>
-  __host__ __device__ void operator=(const Octree<OtherDeviceType> &other) {
-    copyFrom(other);
-  }
+  __host__ bool buildFromFile(const std::string &) { return false; }
 
-  template <Device OtherDeviceType>
-  __host__ __device__ void copyFrom(const Octree<OtherDeviceType> &other) {
-    m_nodes = other.m_nodes;
-    m_triangleIds = other.m_triangleIds;
-  }
+  __host__ const NodeVector &nodes() const { return m_nodes; }
 
-  __host__ bool buildFromFile(const std::string&) { return false; }
+  __host__ const IntVector &triangleIds() const { return m_triangleIds; }
 
  private:
   NodeVector m_nodes;
@@ -282,6 +276,16 @@ __host__ bool Octree<CPU>::buildFromFile(const std::string &fileName) {
   bool success = in.good();
   in.close();
   return success;
+}
+
+template <>
+__host__ bool Octree<GPU>::buildFromFile(const std::string &fileName) {
+  Octree<CPU> tree;
+  if (tree.buildFromFile(fileName)) {
+    copyFrom(tree);
+    return true;
+  }
+  return false;
 }
 
 typedef Octree<GPU> OctreeGPU;
