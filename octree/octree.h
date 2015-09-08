@@ -3,8 +3,13 @@
 
 #include <fstream>
 #include <ostream>
+
+#include <optix.h>
+#include <optixu/optixu_aabb_namespace.h>
 #include <thrust/device_vector.h>
 #include <thrust/host_vector.h>
+
+using optix::Aabb;
 
 namespace oct {
 
@@ -147,7 +152,7 @@ struct OctNodeCompact {
   uint32_t offset : 28;
   union {
     struct {
-      StorageType num_children : StorageTraits::BITS_NUM_CHILDREN;
+      StorageType numChildren : StorageTraits::BITS_NUM_CHILDREN;
       StorageType i : StorageTraits::BITS_PER_DIMENSION;
       StorageType j : StorageTraits::BITS_PER_DIMENSION;
       StorageType k : StorageTraits::BITS_PER_DIMENSION;
@@ -196,8 +201,13 @@ struct OctNodeCompact {
 //
 ////////////////////////////////////
 
-typedef OctNodeCompact<uint32_t, 0> OctNode64;
-typedef OctNodeCompact<uint64_t, 4> OctNode128;
+enum {
+  PADDING_NONE = 0,
+  PADDING_QUAD = 4
+};
+
+typedef OctNodeCompact<uint32_t, PADDING_NONE> OctNode64;
+typedef OctNodeCompact<uint64_t, PADDING_QUAD> OctNode128;
 
 template <Device DeviceType>
 class Octree {
@@ -214,10 +224,68 @@ class Octree {
   typedef typename TypeSelector<DeviceType, HostIntVectorType,
                                 DeviceIntVectorType>::ValueType IntVector;
 
+  __host__ __device__ Octree() {}
+
+  template <Device OtherDeviceType>
+  __host__ __device__ Octree(const Octree<OtherDeviceType> &other) {
+    copyFrom(other);
+  }
+
+  template <Device OtherDeviceType>
+  __host__ __device__ void operator=(const Octree<OtherDeviceType> &other) {
+    copyFrom(other);
+  }
+
+  template <Device OtherDeviceType>
+  __host__ __device__ void copyFrom(const Octree<OtherDeviceType> &other) {
+    m_nodes = other.m_nodes;
+    m_triangleIds = other.m_triangleIds;
+  }
+
+  __host__ bool buildFromFile(const std::string&) { return false; }
+
  private:
   NodeVector m_nodes;
   IntVector m_triangleIds;
+  Aabb m_aabb;
+  uint32_t m_sampleSizeDescriptor;
+  uint32_t m_maxDepth;
+  uint32_t m_maxLeafSize;
 };
+
+template <>
+__host__ bool Octree<CPU>::buildFromFile(const std::string &fileName) {
+  std::ifstream in(fileName.c_str(), std::ios::binary);
+  uint32_t numObjects = 0;
+  uint32_t numNodes = 0;
+  in.read(reinterpret_cast<char *>(&numNodes), sizeof(uint32_t));
+  std::cout << "numNodes = " << numNodes << "\n";
+  in.read(reinterpret_cast<char *>(&numObjects), sizeof(uint32_t));
+  std::cout << "numObjects = " << numObjects << "\n";
+  in.read(reinterpret_cast<char *>(&m_sampleSizeDescriptor), sizeof(int));
+  std::cout << "m_sampleSizeDescriptor = " << m_sampleSizeDescriptor << "\n";
+  in.read(reinterpret_cast<char *>(&m_maxDepth), sizeof(int));
+  std::cout << "m_maxDepth = " << m_maxDepth << "\n";
+  in.read(reinterpret_cast<char *>(&m_maxLeafSize), sizeof(int));
+  std::cout << "m_maxLeafSize = " << m_maxLeafSize << "\n";
+  in.read(reinterpret_cast<char *>(&m_aabb.m_min), sizeof(float) * 3);
+  std::cout << "m_min = " << m_aabb.m_min.x << " " << m_aabb.m_min.y << " "
+            << m_aabb.m_min.z << "\n";
+  in.read(reinterpret_cast<char *>(&m_aabb.m_max), sizeof(float) * 3);
+  std::cout << "m_max = " << m_aabb.m_max.x << " " << m_aabb.m_max.y << " "
+            << m_aabb.m_max.z << "\n";
+  m_nodes.resize(numNodes);
+  in.read(reinterpret_cast<char *>(&m_nodes[0]), sizeof(NodeType) * numNodes);
+  m_triangleIds.resize(numObjects);
+  in.read(reinterpret_cast<char *>(&m_triangleIds[0]),
+          sizeof(uint32_t) * numObjects);
+  bool success = in.good();
+  in.close();
+  return success;
+}
+
+typedef Octree<GPU> OctreeGPU;
+typedef Octree<CPU> OctreeCPU;
 
 }  // namespace oct
 #endif  // OCTREE_H_
