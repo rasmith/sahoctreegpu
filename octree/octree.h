@@ -8,6 +8,7 @@
 #include <optixu/optixu_aabb_namespace.h>
 #include <thrust/device_vector.h>
 #include <thrust/host_vector.h>
+#include <thrust/system/cpp/memory.h>
 
 using optix::Aabb;
 
@@ -218,11 +219,15 @@ class Octree {
   typedef thrust::device_vector<NodeType> DeviceNodeVectorType;
   typedef thrust::host_vector<int> HostIntVectorType;
   typedef thrust::device_vector<int> DeviceIntVectorType;
+  typedef thrust::device_ptr<uint32_t> DeviceUnsignedIntPtr;
+  typedef thrust::cpp::pointer<uint32_t> HostUnsignedIntPtr;
 
   typedef typename TypeSelector<DeviceType, HostNodeVectorType,
                                 DeviceNodeVectorType>::ValueType NodeVector;
   typedef typename TypeSelector<DeviceType, HostIntVectorType,
                                 DeviceIntVectorType>::ValueType IntVector;
+  typedef typename TypeSelector<DeviceType, HostUnsignedIntPtr,
+                                DeviceUnsignedIntPtr>::ValueType UnsignedIntPtr;
 
   __host__ Octree() {}
 
@@ -230,6 +235,9 @@ class Octree {
   __host__ void copyFrom(const Octree<OtherDeviceType> &other) {
     m_nodes = other.nodes();
     m_triangleIds = other.triangleIds();
+    *m_sampleSizeDescriptor = *other.sampleSizeDescriptor();
+    *m_maxDepth = *other.maxDepth();
+    *m_maxLeafSize = *other.maxLeafSize();
   }
 
   __host__ bool buildFromFile(const std::string &) { return false; }
@@ -238,13 +246,21 @@ class Octree {
 
   __host__ const IntVector &triangleIds() const { return m_triangleIds; }
 
+  __host__ const UnsignedIntPtr sampleSizeDescriptor() const {
+    return m_sampleSizeDescriptor;
+  }
+
+  __host__ const UnsignedIntPtr maxDepth() const { return m_maxDepth; }
+
+  __host__ const UnsignedIntPtr maxLeafSize() const { return m_maxLeafSize; }
+
  private:
   NodeVector m_nodes;
   IntVector m_triangleIds;
   Aabb m_aabb;
-  uint32_t m_sampleSizeDescriptor;
-  uint32_t m_maxDepth;
-  uint32_t m_maxLeafSize;
+  UnsignedIntPtr m_sampleSizeDescriptor;
+  UnsignedIntPtr m_maxDepth;
+  UnsignedIntPtr m_maxLeafSize;
 };
 
 template <>
@@ -256,12 +272,13 @@ __host__ bool Octree<CPU>::buildFromFile(const std::string &fileName) {
   std::cout << "numNodes = " << numNodes << "\n";
   in.read(reinterpret_cast<char *>(&numObjects), sizeof(uint32_t));
   std::cout << "numObjects = " << numObjects << "\n";
-  in.read(reinterpret_cast<char *>(&m_sampleSizeDescriptor), sizeof(int));
-  std::cout << "m_sampleSizeDescriptor = " << m_sampleSizeDescriptor << "\n";
-  in.read(reinterpret_cast<char *>(&m_maxDepth), sizeof(int));
-  std::cout << "m_maxDepth = " << m_maxDepth << "\n";
-  in.read(reinterpret_cast<char *>(&m_maxLeafSize), sizeof(int));
-  std::cout << "m_maxLeafSize = " << m_maxLeafSize << "\n";
+  in.read(reinterpret_cast<char *>(m_sampleSizeDescriptor.get()), sizeof(int));
+  std::cout << "m_sampleSizeDescriptor = " << *m_sampleSizeDescriptor.get()
+            << "\n";
+  in.read(reinterpret_cast<char *>(m_maxDepth.get()), sizeof(int));
+  std::cout << "m_maxDepth = " << *m_maxDepth.get() << "\n";
+  in.read(reinterpret_cast<char *>(m_maxLeafSize.get()), sizeof(int));
+  std::cout << "m_maxLeafSize = " << *m_maxLeafSize.get() << "\n";
   in.read(reinterpret_cast<char *>(&m_aabb.m_min), sizeof(float) * 3);
   std::cout << "m_min = " << m_aabb.m_min.x << " " << m_aabb.m_min.y << " "
             << m_aabb.m_min.z << "\n";
