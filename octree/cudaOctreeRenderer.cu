@@ -78,6 +78,10 @@ __global__ void traceKernel(const Ray* rays, const int3* indices,
 CUDAOctreeRenderer::CUDAOctreeRenderer(const ConfigLoader& config)
     : RTPSimpleRenderer(config) {}
 
+CUDAOctreeRenderer::CUDAOctreeRenderer(const ConfigLoader& config,
+                                       const BuildOptions& options)
+    : RTPSimpleRenderer(config), buildOptions(options) {}
+
 void CUDAOctreeRenderer::render() {
   int3* d_indices;
   float3* d_vertices;
@@ -104,9 +108,9 @@ void CUDAOctreeRenderer::buildOnDevice(const int3* indices,
                                        const float3* vertices,
                                        uint32_t* d_octree) {}
 
-void CUDAOctreeRenderer::buildFromFile(
-    const int3* indices, const float3* vertices,
-    uint32_t* d_octree) {
+void CUDAOctreeRenderer::buildFromFile(const int3* indices,
+                                       const float3* vertices,
+                                       uint32_t* d_octree) {
   Octree<LAYOUT_AOS> octreeFileAos;
   octreeFileAos.buildFromFile(buildOptions.info);
 }
@@ -134,7 +138,6 @@ void CUDAOctreeRenderer::traceOnDevice(const int3* indices,
 
   uint32_t d_octree;
   build(indices, vertices, &d_octree);
-
 
   traceKernel << <numBlocks, numThreadsPerBlock>>>
       (rayBuffer.ptr(), indices, vertices, rayBuffer.count(),

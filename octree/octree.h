@@ -157,6 +157,7 @@ struct OctNodeCompact {
     return SizeDescriptorToSamplesPerDimensionPolicy<
         StorageType>::getSamplesPerDimension(footer.internal.sizeDescriptor);
   }
+  __host__
   void print(std::ostream &os) const {
     if (header.type == NODE_INTERNAL) {
       os << "[N @" << header.octant << " +" << header.offset << " "
@@ -170,6 +171,7 @@ struct OctNodeCompact {
          << "#" << footer.size << "]";
     }
   }
+  __host__
   void Serialize(std::ofstream &os) const {
     os.write(reinterpret_cast<const char *>(this), sizeof(NodeType));
   }
@@ -177,6 +179,7 @@ struct OctNodeCompact {
     return compareBits<sizeof(NodeType) - BytesPadding>(this, &b);
   }
   bool operator!=(const NodeType &b) const { return !(*this == b); }
+  __host__
   friend std::ostream &operator<<(std::ostream &os, const NodeType &node) {
     node.print(os);
     return os;
@@ -262,6 +265,7 @@ class Octree {
     m_nodeStorage.Free();
   }
 
+  __host__
   inline bool buildFromFile(const char *fileName) { return false; }
 
   template <Layout OtherNodeLayout>
@@ -309,7 +313,9 @@ class Octree {
   uint32_t m_numTriangles;
 };
 
+
 template <>
+__host__
 bool Octree<LAYOUT_AOS>::buildFromFile(const char *fileName);
 
 }  // namespace oct

@@ -32,6 +32,9 @@
 #include "cudaSimpleRenderer.h"
 #include "cudaOctreeRenderer.h"
 
+using oct::BuildOptions;
+using oct::CUDAOctreeRenderer;
+
 void printUsageAndExit(const char* argv0) {
   std::cerr
       << "Usage  : " << argv0 << " [options] obj\n"
@@ -40,12 +43,6 @@ void printUsageAndExit(const char* argv0) {
       << "  -h  | --help                   Print this usage message\n"
       << "  -o  | --output <ppm_file>      Specify output image name (default: "
          "output.ppm)\n"
-      //<< "  -o  | --obj <obj_file>                     Specify .OBJ model to
-      // be rendered\n"
-      // << "  -c  | --context [(cpu)|cuda]               Specify context type.
-      // Default is cpu\n"
-      // << "  -b  | --buffer [(host)|cuda]               Specify buffer type.
-      // Default is host\n"
       << "  -w  | --width <number>         Specify output image width "
          "(default: 640)\n"
       << "  -r  | --renderer <type>        Specify renderer type\n"
@@ -68,15 +65,12 @@ enum RendererType {
 
 int main(int argc, char** argv) {
   ConfigLoader config;
+  BuildOptions buildOptions;
   RendererType rtype = CPU_RTP_SIMPLE;
-
-  // set defaults
-  // RTPcontexttype contextType = RTP_CONTEXT_TYPE_CPU;
-  // RTPbuffertype bufferType = RTP_BUFFER_TYPE_HOST;
-  // std::string objFilename = std::string( sutilSamplesDir() ) +
-  // "/simpleAnimation/cow.obj";
-  // int width = 640;
-  // int height = 0;
+  char buildInputFile[2048];
+  bool haveBuildInputFile = false;
+  buildOptions.type = BuildOptions::BUILD_ON_DEVICE;
+  buildOptions.info = NULL;
 
   // parse arguments
   bool foundObj = false;
@@ -89,34 +83,16 @@ int main(int argc, char** argv) {
       foundObj = true;
     } else if ((arg == "-o" || arg == "--output") && i + 1 < argc) {
       config.imageFilename = argv[++i];
-      // }
-      // else if( (arg == "-o" || arg == "--obj") && i+1 < argc )
-      // {
-      //   config.objFilename = argv[++i];
-      // }
-      // else if( ( arg == "-c" || arg == "--context" ) && i+1 < argc )
-      // {
-      //   std::string param( argv[++i] );
-      //   if( param == "cpu" )
-      //     contextType = RTP_CONTEXT_TYPE_CPU;
-      //   else if( param == "cuda" )
-      //     contextType = RTP_CONTEXT_TYPE_CUDA;
-      //   else
-      //     printUsageAndExit( argv[0] );
-      // }
-      // else if( ( arg == "-b" || arg == "--buffer" ) && i+1 < argc )
-      // {
-      //   std::string param( argv[++i] );
-      //   if( param == "host" )
-      //     bufferType = RTP_BUFFER_TYPE_HOST;
-      //   else if( param == "cuda" )
-      //     bufferType = RTP_BUFFER_TYPE_CUDA_LINEAR;
-      //   else
-      //     printUsageAndExit( argv[0] );
-      // }
     } else if ((arg == "-w" || arg == "--width") && i + 1 < argc) {
       config.imageWidth = atoi(argv[++i]);
+    } else if (arg == "--build-input" && i + 1 < argc) {
+      strcpy(buildInputFile, argv[++i]);
+      buildOptions.info = buildInputFile;
+      haveBuildInputFile = true;
+    } else if (arg == "--build-type" && i + 1 < argc) {
+      BuildOptions::stringToBuildOptionType(argv[++i], &buildOptions.type);
     } else if ((arg == "-r" || arg == "--renderer") && i + 1 < argc) {
+      std::cout << "Selecting renderer:";
       std::string type(argv[++i]);
       if (type.find("gpu_") == 0) {
         config.contextType = RTP_CONTEXT_TYPE_CUDA;
@@ -125,13 +101,17 @@ int main(int argc, char** argv) {
         config.contextType = RTP_CONTEXT_TYPE_CPU;
         config.bufferType = RTP_BUFFER_TYPE_HOST;
       }
-      if (type.compare("cpu_rtp_simple")) {
+      if (type.compare("cpu_rtp_simple") == 0) {
+        std::cout << "cpu_rtp_simple\n";
         rtype = CPU_RTP_SIMPLE;
-      } else if (type.compare("gpu_rtp_simple")) {
+      } else if (type.compare("gpu_rtp_simple") == 0) {
+        std::cout << "gpu_rtp_simple\n";
         rtype = GPU_RTP_SIMPLE;
-      } else if (type.compare("gpu_cuda_simple")) {
+      } else if (type.compare("gpu_cuda_simple") == 0) {
+        std::cout << "gpu_cuda_simple\n";
         rtype = GPU_CUDA_SIMPLE;
-      } else if (type.compare("gpu_cuda_octree")) {
+      } else if (type.compare("gpu_cuda_octree") == 0) {
+        std::cout << "gpu_cuda_octree\n";
         rtype = GPU_CUDA_OCTREE;
       }
     } else {
@@ -145,13 +125,19 @@ int main(int argc, char** argv) {
     printUsageAndExit(argv[0]);
   }
 
+  if (buildOptions.type == BuildOptions::BUILD_FROM_FILE && !haveBuildInputFile) {
+    std::cerr << "Building from file specified but no input file given!\n";
+    printUsageAndExit(argv[0]);
+  }
+
   Renderer* renderer = NULL;
   if (rtype == CPU_RTP_SIMPLE || rtype == GPU_RTP_SIMPLE) {
     renderer = new RTPSimpleRenderer(config);
   } else if (rtype == GPU_CUDA_SIMPLE) {
     renderer = new CUDASimpleRenderer(config);
   } else if (rtype == GPU_CUDA_OCTREE) {
-    renderer = new oct::CUDAOctreeRenderer(config);
+    std::cout << "Running CUDAOctreeRenderer.\n";
+    renderer = new CUDAOctreeRenderer(config, buildOptions);
   } else {
     renderer = new RTPSimpleRenderer(config);
   }
