@@ -4,6 +4,7 @@
 #include <optix_prime.h>
 #include "rtpSimpleRenderer.h"
 #include "configLoader.h"
+#include "octree.h"
 
 namespace oct {
 
@@ -25,9 +26,12 @@ class CUDAOctreeRenderer : public RTPSimpleRenderer {
   CUDAOctreeRenderer(const ConfigLoader& config);
   virtual ~CUDAOctreeRenderer() {}
   void render();
-  void build();
-  void buildOnDevice();
-  void buildFromFile();
+  void build(const int3* indices, const float3* vertices,
+             uint32_t* d_octree);
+  void buildOnDevice(const int3* indices, const float3* vertices,
+                     uint32_t* d_octree);
+  void buildFromFile(const int3* indices, const float3* vertices,
+                     uint32_t* d_octree);
   inline void setBuildOption(const BuildOptions& options) {
     buildOptions = options;
   }
@@ -37,5 +41,5 @@ class CUDAOctreeRenderer : public RTPSimpleRenderer {
   BuildOptions buildOptions;
 };
 
-} // namespace oct
+}  // namespace oct
 #endif

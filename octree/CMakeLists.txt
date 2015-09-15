@@ -39,6 +39,7 @@ OPTIX_add_sample_executable( octree
   cudaOctreeRenderer.cu
   image.cpp
   main.cpp
+  octree.cpp
   renderer.cpp
   rtpSimpleRenderer.cu
   sceneLoader.cpp

@@ -3,14 +3,14 @@
 
 #include <fstream>
 #include <ostream>
+#include <stdint.h>
 
-#include <optix.h>
+#include <optix_prime.h>
 #include <optixu/optixu_aabb_namespace.h>
-#include <thrust/device_vector.h>
-#include <thrust/host_vector.h>
-#include <thrust/system/cpp/memory.h>
 
 using optix::Aabb;
+using optix::float3; 
+using optix::int3;
 
 namespace oct {
 
@@ -33,41 +33,21 @@ struct Padding<0> {};
 //
 ////////////////////////////////////
 template <unsigned int NumBytes>
-bool compareBits(const unsigned char *a, const unsigned char *b) {
+inline bool compareBits(const unsigned char *a, const unsigned char *b) {
   bool result = true;
   result &= compareBits<NumBytes - 1>(a + 1, b + 1);
   return result;
 }
 
 template <>
-bool compareBits<1>(const unsigned char *a, const unsigned char *b) {
+inline bool compareBits<1>(const unsigned char *a, const unsigned char *b) {
   return ((*a) ^ (*b)) == 0;
 }
 
 template <>
-bool compareBits<0>(const unsigned char *a, const unsigned char *b) {
+inline bool compareBits<0>(const unsigned char *a, const unsigned char *b) {
   return true;
 }
-
-////////////////////////////////////
-//
-// Device Options
-//
-////////////////////////////////////
-enum Device {
-  CPU,
-  GPU
-};
-
-template <Device DeviceType, typename CpuType, typename GpuType>
-struct TypeSelector {
-  typedef CpuType ValueType;
-};
-
-template <typename CpuType, typename GpuType>
-struct TypeSelector<GPU, CpuType, GpuType> {
-  typedef GpuType ValueType;
-};
 
 ////////////////////////////////////
 //
@@ -75,7 +55,7 @@ struct TypeSelector<GPU, CpuType, GpuType> {
 //
 ////////////////////////////////////
 template <typename StorageType>
-struct OctNodeCompactStorageTraits {
+struct OctNodeStorageTraits {
   enum {
     BITS_NUM_CHILDREN
   };
@@ -91,7 +71,7 @@ struct OctNodeCompactStorageTraits {
 };
 
 template <>
-struct OctNodeCompactStorageTraits<uint32_t> {
+struct OctNodeStorageTraits<uint32_t> {
   enum {
     BITS_NUM_CHILDREN = 3
   };
@@ -108,7 +88,7 @@ struct OctNodeCompactStorageTraits<uint32_t> {
 };
 
 template <>
-struct OctNodeCompactStorageTraits<uint64_t> {
+struct OctNodeStorageTraits<uint64_t> {
   enum {
     BITS_NUM_CHILDREN = 3
   };
@@ -138,19 +118,20 @@ struct SizeDescriptorToSamplesPerDimensionPolicy<uint32_t> {
   }
 };
 
-template <typename StorageType, int BytesPadding>
-struct OctNodeCompact {
-  typedef OctNodeCompact<StorageType, BytesPadding> OctNodeCompactType;
-  typedef OctNodeCompactStorageTraits<StorageType> StorageTraits;
+enum OctNodeType {
+  NODE_LEAF,
+  NODE_INTERNAL
+};
 
-  enum NodeType {
-    LEAF,
-    INTERNAL
-  };
-
+struct OctNodeHeader {
   uint32_t type : 1;
   uint32_t octant : 3;
   uint32_t offset : 28;
+};
+
+template <typename StorageType>
+struct OctNodeFooter {
+  typedef OctNodeStorageTraits<StorageType> StorageTraits;
   union {
     struct {
       StorageType numChildren : StorageTraits::BITS_NUM_CHILDREN;
@@ -164,33 +145,39 @@ struct OctNodeCompact {
       StorageType size;
     } leaf;
   };
+};
+
+template <typename StorageType, int BytesPadding>
+struct OctNodeCompact {
+  typedef OctNodeCompact<StorageType, BytesPadding> NodeType;
+  OctNodeHeader header;
+  OctNodeFooter<StorageType> footer;
   Padding<BytesPadding> padding;
-  int getSamplesPerDimension() const {
+  inline uint32_t samplesPerDimension() const {
     return SizeDescriptorToSamplesPerDimensionPolicy<
-        StorageType>::getSamplesPerDimension(internal.sizeDescriptor);
+        StorageType>::getSamplesPerDimension(footer.internal.sizeDescriptor);
   }
   void print(std::ostream &os) const {
-    if (type == INTERNAL) {
-      os << "[N @" << octant << " +" << offset << " "
-         << "#" << internal.num_children << " "
-         << "i:" << internal.i << " "
-         << "j:" << internal.j << " "
-         << "k:" << internal.k << " "
-         << "ss:" << internal.sizeDescriptor << "]";
-    } else if (type == LEAF) {
-      os << "[L @" << octant << " +" << offset << " "
-         << "#" << leaf.size << "]";
+    if (header.type == NODE_INTERNAL) {
+      os << "[N @" << header.octant << " +" << header.offset << " "
+         << "#" << footer.numChildren << " "
+         << "i:" << footer.i << " "
+         << "j:" << footer.j << " "
+         << "k:" << footer.k << " "
+         << "ss:" << samplesPerDimension() << "]";
+    } else if (header.type == NODE_LEAF) {
+      os << "[L @" << header.octant << " +" << header.offset << " "
+         << "#" << footer.size << "]";
     }
   }
   void Serialize(std::ofstream &os) const {
     os.write(reinterpret_cast<const char *>(this), sizeof(NodeType));
   }
-  bool operator==(const OctNodeCompactType &b) const {
-    return compareBits<sizeof(OctNodeCompactType) - BytesPadding>(this, &b);
+  bool operator==(const NodeType &b) const {
+    return compareBits<sizeof(NodeType) - BytesPadding>(this, &b);
   }
-  bool operator!=(const OctNodeCompactType &b) const { return !(*this == b); }
-  friend std::ostream &operator<<(std::ostream &os,
-                                  const OctNodeCompactType &node) {
+  bool operator!=(const NodeType &b) const { return !(*this == b); }
+  friend std::ostream &operator<<(std::ostream &os, const NodeType &node) {
     node.print(os);
     return os;
   }
@@ -207,106 +194,123 @@ enum {
   PADDING_QUAD = 4
 };
 
-typedef OctNodeCompact<uint32_t, PADDING_NONE> OctNode64;
 typedef OctNodeCompact<uint64_t, PADDING_QUAD> OctNode128;
 
-template <Device DeviceType>
-class Octree {
- public:
+enum Layout {
+  LAYOUT_AOS,
+  LAYOUT_SOA
+};
+
+// 128 bits per node, compact layout
+template <Layout LayoutType>
+struct NodeStorage {
   typedef OctNode128 NodeType;
+  NodeType *nodes;
+  uint32_t numNodes;
+  NodeStorage() : nodes(NULL), numNodes(0) {}
+  void Free() { delete[] nodes; }
+};
 
-  typedef thrust::host_vector<NodeType> HostNodeVectorType;
-  typedef thrust::device_vector<NodeType> DeviceNodeVectorType;
-  typedef thrust::host_vector<int> HostIntVectorType;
-  typedef thrust::device_vector<int> DeviceIntVectorType;
-  typedef thrust::device_ptr<uint32_t> DeviceUnsignedIntPtr;
-  typedef thrust::cpp::pointer<uint32_t> HostUnsignedIntPtr;
-
-  typedef typename TypeSelector<DeviceType, HostNodeVectorType,
-                                DeviceNodeVectorType>::ValueType NodeVector;
-  typedef typename TypeSelector<DeviceType, HostIntVectorType,
-                                DeviceIntVectorType>::ValueType IntVector;
-  typedef typename TypeSelector<DeviceType, HostUnsignedIntPtr,
-                                DeviceUnsignedIntPtr>::ValueType UnsignedIntPtr;
-
-  __host__ Octree() {}
-
-  template <Device OtherDeviceType>
-  __host__ void copyFrom(const Octree<OtherDeviceType> &other) {
-    m_nodes = other.nodes();
-    m_triangleIds = other.triangleIds();
-    *m_sampleSizeDescriptor = *other.sampleSizeDescriptor();
-    *m_maxDepth = *other.maxDepth();
-    *m_maxLeafSize = *other.maxLeafSize();
+// 96 bits per node, AOS layout
+template <>
+struct NodeStorage<LAYOUT_SOA> {
+  typedef OctNodeFooter<uint64_t> OctNodeFooterType;
+  OctNodeHeader *headers;
+  OctNodeFooterType *footers;
+  uint32_t numNodes;
+  NodeStorage() : headers(NULL), footers(NULL), numNodes(0) {}
+  void Free() {
+    delete[] headers;
+    delete[] footers;
   }
+};
 
-  __host__ bool buildFromFile(const std::string &) { return false; }
-
-  __host__ const NodeVector &nodes() const { return m_nodes; }
-
-  __host__ const IntVector &triangleIds() const { return m_triangleIds; }
-
-  __host__ const UnsignedIntPtr sampleSizeDescriptor() const {
-    return m_sampleSizeDescriptor;
-  }
-
-  __host__ const UnsignedIntPtr maxDepth() const { return m_maxDepth; }
-
-  __host__ const UnsignedIntPtr maxLeafSize() const { return m_maxLeafSize; }
-
- private:
-  NodeVector m_nodes;
-  IntVector m_triangleIds;
-  Aabb m_aabb;
-  UnsignedIntPtr m_sampleSizeDescriptor;
-  UnsignedIntPtr m_maxDepth;
-  UnsignedIntPtr m_maxLeafSize;
+template <Layout LayoutDest, Layout LayoutSource>
+struct NodeStorageCopier {
+  void copy(NodeStorage<LayoutDest> *dest,
+            const NodeStorage<LayoutSource> *src) const {}
 };
 
 template <>
-__host__ bool Octree<CPU>::buildFromFile(const std::string &fileName) {
-  std::ifstream in(fileName.c_str(), std::ios::binary);
-  uint32_t numObjects = 0;
-  uint32_t numNodes = 0;
-  in.read(reinterpret_cast<char *>(&numNodes), sizeof(uint32_t));
-  std::cout << "numNodes = " << numNodes << "\n";
-  in.read(reinterpret_cast<char *>(&numObjects), sizeof(uint32_t));
-  std::cout << "numObjects = " << numObjects << "\n";
-  in.read(reinterpret_cast<char *>(m_sampleSizeDescriptor.get()), sizeof(int));
-  std::cout << "m_sampleSizeDescriptor = " << *m_sampleSizeDescriptor.get()
-            << "\n";
-  in.read(reinterpret_cast<char *>(m_maxDepth.get()), sizeof(int));
-  std::cout << "m_maxDepth = " << *m_maxDepth.get() << "\n";
-  in.read(reinterpret_cast<char *>(m_maxLeafSize.get()), sizeof(int));
-  std::cout << "m_maxLeafSize = " << *m_maxLeafSize.get() << "\n";
-  in.read(reinterpret_cast<char *>(&m_aabb.m_min), sizeof(float) * 3);
-  std::cout << "m_min = " << m_aabb.m_min.x << " " << m_aabb.m_min.y << " "
-            << m_aabb.m_min.z << "\n";
-  in.read(reinterpret_cast<char *>(&m_aabb.m_max), sizeof(float) * 3);
-  std::cout << "m_max = " << m_aabb.m_max.x << " " << m_aabb.m_max.y << " "
-            << m_aabb.m_max.z << "\n";
-  m_nodes.resize(numNodes);
-  in.read(reinterpret_cast<char *>(&m_nodes[0]), sizeof(NodeType) * numNodes);
-  m_triangleIds.resize(numObjects);
-  in.read(reinterpret_cast<char *>(&m_triangleIds[0]),
-          sizeof(uint32_t) * numObjects);
-  bool success = in.good();
-  in.close();
-  return success;
-}
+struct NodeStorageCopier<LAYOUT_SOA, LAYOUT_AOS> {
 
-template <>
-__host__ bool Octree<GPU>::buildFromFile(const std::string &fileName) {
-  Octree<CPU> tree;
-  if (tree.buildFromFile(fileName)) {
-    copyFrom(tree);
+  typedef NodeStorage<LAYOUT_SOA>::OctNodeFooterType OctNodeFooterType;
+  void copy(NodeStorage<LAYOUT_SOA> *dest,
+            const NodeStorage<LAYOUT_AOS> *src) const {
+    if (dest->headers != NULL) {
+      delete[] dest->headers;
+      delete[] dest->footers;
+    }
+    dest->headers = new OctNodeHeader[src->numNodes];
+    dest->footers = new OctNodeFooterType[src->numNodes];
+    for (uint32_t i = 0; i < src->numNodes; ++i) {
+      dest->headers[i] = src->nodes[i].header;
+      dest->footers[i] = src->nodes[i].footer;
+    }
+    dest->numNodes = src->numNodes;
+  }
+};
+
+template <Layout NodeLayout>
+class Octree {
+ public:
+  typedef NodeStorage<NodeLayout> NodeStorageType;
+
+  Octree() {}
+  ~Octree() {
+    delete[] m_triangleIndices;
+    m_nodeStorage.Free();
+  }
+
+  inline bool buildFromFile(const char *fileName) { return false; }
+
+  template <Layout OtherNodeLayout>
+  bool copy(const Octree<OtherNodeLayout> &octree) {
+    NodeStorageCopier<NodeLayout, OtherNodeLayout> nodeCopier;
+    nodeCopier.copy(&m_nodeStorage, octree.nodeStorage());
+    m_numTriangleReferences = octree.numTriangleReferences();
+    m_triangleIndices = new uint32_t[m_numTriangleReferences];
+    memcpy(m_triangleIndices, octree.triangleIndices(),
+           sizeof(uint32_t) * m_numTriangleReferences);
+    m_aabb = octree.aabb();
+    m_defaultSampleSizeDescriptor = octree.defaultSampleSizeDescriptor();
+    m_maxDepth = octree.maxDepth();
+    m_maxLeafSize = octree.maxLeafSize();
+    m_numTriangles = octree.numTriangles();
+    m_vertices = octree.vertices();
+    m_indices = octree.incides();
+    m_numTriangles = octree.numTriangles();
     return true;
   }
-  return false;
-}
 
-typedef Octree<GPU> OctreeGPU;
-typedef Octree<CPU> OctreeCPU;
+  const NodeStorage<NodeLayout> &nodeStorage() const { return m_nodeStorage; }
+  const uint32_t *triangleIndices() const { return m_triangleIndices; }
+  uint32_t numTriangleReferences() const { return m_numTriangleReferences; }
+  const Aabb &aabb() const { return m_aabb; }
+  uint32_t defaultSampleSizeDescriptor() const {
+    return m_defaultSampleSizeDescriptor;
+  }
+  uint32_t maxDepth() const { return m_maxDepth; }
+  uint32_t maxLeafSize() const { return m_maxLeafSize; }
+  const float3 *indices() const { return m_indices; }
+  const float3 *vertices() const { return m_vertices; }
+  uint32_t numTriangles() const { return m_numTriangles; }
+
+ private:
+  NodeStorageType m_nodeStorage;
+  uint32_t *m_triangleIndices;
+  uint32_t m_numTriangleReferences;
+  Aabb m_aabb;
+  uint32_t m_defaultSampleSizeDescriptor;
+  uint32_t m_maxDepth;
+  uint32_t m_maxLeafSize;
+  const float3 *m_indices;
+  const float3 *m_vertices;
+  uint32_t m_numTriangles;
+};
+
+template <>
+bool Octree<LAYOUT_AOS>::buildFromFile(const char *fileName);
 
 }  // namespace oct
 #endif  // OCTREE_H_

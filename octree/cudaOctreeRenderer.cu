@@ -100,20 +100,25 @@ void CUDAOctreeRenderer::render() {
   cudaFree(d_vertices);
 }
 
-void CUDAOctreeRenderer::buildOnDevice() {}
+void CUDAOctreeRenderer::buildOnDevice(const int3* indices,
+                                       const float3* vertices,
+                                       uint32_t* d_octree) {}
 
-void CUDAOctreeRenderer::buildFromFile() {
-  OctreeGPU octreeGpu;
-  octreeGpu.buildFromFile(buildOptions.info);
+void CUDAOctreeRenderer::buildFromFile(
+    const int3* indices, const float3* vertices,
+    uint32_t* d_octree) {
+  Octree<LAYOUT_AOS> octreeFileAos;
+  octreeFileAos.buildFromFile(buildOptions.info);
 }
 
-void CUDAOctreeRenderer::build() {
+void CUDAOctreeRenderer::build(const int3* indices, const float3* vertices,
+                               uint32_t* d_octree) {
   switch (buildOptions.type) {
     case BuildOptions::BUILD_FROM_FILE:
-      buildFromFile();
+      buildFromFile(indices, vertices, d_octree);
       break;
     case BuildOptions::BUILD_ON_DEVICE:
-      buildFromFile();
+      buildOnDevice(indices, vertices, d_octree);
       break;
     default:
       break;
@@ -127,7 +132,9 @@ void CUDAOctreeRenderer::traceOnDevice(const int3* indices,
   const int numBlocks =
       (rayBuffer.count() + numThreadsPerBlock - 1) / numThreadsPerBlock;
 
-  build();
+  uint32_t d_octree;
+  build(indices, vertices, &d_octree);
+
 
   traceKernel << <numBlocks, numThreadsPerBlock>>>
       (rayBuffer.ptr(), indices, vertices, rayBuffer.count(),
