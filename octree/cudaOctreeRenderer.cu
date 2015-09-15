@@ -113,6 +113,8 @@ void CUDAOctreeRenderer::buildFromFile(const int3* indices,
                                        uint32_t* d_octree) {
   Octree<LAYOUT_AOS> octreeFileAos;
   octreeFileAos.buildFromFile(buildOptions.info);
+  Octree<LAYOUT_SOA> octreeFileSoa;
+  octreeFileSoa.copy(octreeFileAos);
 }
 
 void CUDAOctreeRenderer::build(const int3* indices, const float3* vertices,

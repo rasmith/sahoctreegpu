@@ -24,9 +24,6 @@ struct Padding {
   unsigned char padding[NumBytes];
 };
 
-template <>
-struct Padding<0> {};
-
 ///////////////////////////////////
 //
 // Bitwise Operations
@@ -108,12 +105,12 @@ struct OctNodeStorageTraits<uint64_t> {
 // forced to use this.
 template <typename StorageType>
 struct SizeDescriptorToSamplesPerDimensionPolicy {
-  inline int getSamplesPerDimension(uint32_t value) { return value; }
+  static inline int getSamplesPerDimension(uint32_t value) { return value; }
 };
 
 template <>
 struct SizeDescriptorToSamplesPerDimensionPolicy<uint32_t> {
-  inline int getSamplesPerDimension(uint32_t value) {
+  static inline int getSamplesPerDimension(uint32_t value) {
     return ((1 << (value + 1)) - 1);
   }
 };
@@ -161,14 +158,14 @@ struct OctNodeCompact {
   void print(std::ostream &os) const {
     if (header.type == NODE_INTERNAL) {
       os << "[N @" << header.octant << " +" << header.offset << " "
-         << "#" << footer.numChildren << " "
-         << "i:" << footer.i << " "
-         << "j:" << footer.j << " "
-         << "k:" << footer.k << " "
+         << "#" << footer.internal.numChildren << " "
+         << "i:" << footer.internal.i << " "
+         << "j:" << footer.internal.j << " "
+         << "k:" << footer.internal.k << " "
          << "ss:" << samplesPerDimension() << "]";
     } else if (header.type == NODE_LEAF) {
       os << "[L @" << header.octant << " +" << header.offset << " "
-         << "#" << footer.size << "]";
+         << "#" << footer.leaf.size << "]";
     }
   }
   __host__
@@ -197,7 +194,7 @@ enum {
   PADDING_QUAD = 4
 };
 
-typedef OctNodeCompact<uint64_t, PADDING_QUAD> OctNode128;
+typedef OctNodeCompact<uint64_t, PADDING_NONE> OctNode128;
 
 enum Layout {
   LAYOUT_AOS,
@@ -271,7 +268,7 @@ class Octree {
   template <Layout OtherNodeLayout>
   bool copy(const Octree<OtherNodeLayout> &octree) {
     NodeStorageCopier<NodeLayout, OtherNodeLayout> nodeCopier;
-    nodeCopier.copy(&m_nodeStorage, octree.nodeStorage());
+    nodeCopier.copy(&m_nodeStorage, &octree.nodeStorage());
     m_numTriangleReferences = octree.numTriangleReferences();
     m_triangleIndices = new uint32_t[m_numTriangleReferences];
     memcpy(m_triangleIndices, octree.triangleIndices(),
@@ -282,7 +279,7 @@ class Octree {
     m_maxLeafSize = octree.maxLeafSize();
     m_numTriangles = octree.numTriangles();
     m_vertices = octree.vertices();
-    m_indices = octree.incides();
+    m_indices = octree.indices();
     m_numTriangles = octree.numTriangles();
     return true;
   }
