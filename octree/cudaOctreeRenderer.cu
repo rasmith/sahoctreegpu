@@ -147,6 +147,7 @@ void CUDAOctreeRenderer::traceOnDevice(const int3* indices,
       (rayBuffer.ptr(), indices, vertices, rayBuffer.count(),
        scene.numTriangles, hitBuffer.ptr());
   Octree<LAYOUT_SOA>::freeOnGpu(d_octree);
+  CHK_CUDA(cudaFree((void *)(d_octree)));
 }
 
 }  // namespace oct

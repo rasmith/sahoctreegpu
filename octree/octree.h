@@ -421,11 +421,15 @@ class Octree {
         m_vertices(0),
         m_indices(0),
         m_numVertices(0),
-        m_numTriangles(0) {}
+        m_numTriangles(0),
+        m_owns_vertices(false),
+        m_owns_indices(false) {}
 
   ~Octree() {
     if (m_triangleIndices) delete[] m_triangleIndices;
     m_nodeStorage.free();
+    if (m_owns_vertices && m_vertices) delete[] m_vertices;
+    if (m_owns_indices && m_indices) delete[] m_indices;
   }
 
   void setGeometry(const float3 *vertices, const int3 *indices,
@@ -456,10 +460,10 @@ class Octree {
     m_defaultSampleSizeDescriptor = octree.defaultSampleSizeDescriptor();
     m_maxDepth = octree.maxDepth();
     m_maxLeafSize = octree.maxLeafSize();
-    m_numTriangles = octree.numTriangles();
     m_vertices = octree.vertices();
     m_indices = octree.indices();
     m_numTriangles = octree.numTriangles();
+    m_numVertices = octree.numVertices();
     if (NodeLayout == LAYOUT_SOA) {
       uint32_t nodeCount =
           (m_nodeStorage.numNodes < 10 ? m_nodeStorage.numNodes : 10);
@@ -625,12 +629,13 @@ class Octree {
     // Copy vertices to CPU.
     std::cout << "Copy vertices to CPU.\n";
     float3 *d_vertices = NULL;
-    m_vertices = new float3[m_numVertices];
     if (m_vertices) delete[] m_vertices;
+    m_vertices = new float3[m_numVertices];
+    m_owns_vertices = true;
     CHK_CUDA(cudaMemcpy((void *)(&d_vertices),
                         (void *)(&(d_octree->m_vertices)), sizeof(float3 *),
                         cudaMemcpyDeviceToHost));
-    CHK_CUDA(cudaMemcpy((void *)(&m_vertices), (const void *)(d_vertices),
+    CHK_CUDA(cudaMemcpy((void *)(m_vertices), (const void *)(d_vertices),
                         sizeof(float3) * m_numVertices,
                         cudaMemcpyDeviceToHost));
 
@@ -639,10 +644,11 @@ class Octree {
     int3 *d_indices = NULL;
     if (m_indices) delete[] m_indices;
     m_indices = new int3[m_numTriangles];
+    m_owns_indices = true;
     CHK_CUDA(cudaMemcpy((void *)(&d_indices),
                         (const void *)(&(d_octree->m_indices)), sizeof(int3 *),
                         cudaMemcpyDeviceToHost));
-    CHK_CUDA(cudaMemcpy((void *)(&m_indices), (const void *)(d_indices),
+    CHK_CUDA(cudaMemcpy((void *)(m_indices), (const void *)(d_indices),
                         sizeof(int3) * m_numTriangles, cudaMemcpyDeviceToHost));
     std::cout << "done!\n";
   }
@@ -731,6 +737,8 @@ class Octree {
   const int3 *m_indices;
   uint32_t m_numVertices;
   uint32_t m_numTriangles;
+  bool m_owns_indices;
+  bool m_owns_vertices;
 };
 
 template <>

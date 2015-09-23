@@ -144,4 +144,5 @@ int main(int argc, char** argv) {
   renderer->render();
   renderer->shade();
   renderer->write();
+  if (renderer) delete renderer;
 }
