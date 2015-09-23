@@ -104,27 +104,28 @@ void CUDAOctreeRenderer::render() {
   cudaFree(d_vertices);
 }
 
-void CUDAOctreeRenderer::buildOnDevice(const int3* indices,
-                                       const float3* vertices,
-                                       Octree<LAYOUT_SOA>* d_octree) {}
+void CUDAOctreeRenderer::buildOnDevice(Octree<LAYOUT_SOA>* d_octree) {}
 
-void CUDAOctreeRenderer::buildFromFile(const int3* indices,
-                                       const float3* vertices,
-                                       Octree<LAYOUT_SOA>* d_octree) {
+void CUDAOctreeRenderer::buildFromFile(Octree<LAYOUT_SOA>* d_octree) {
   Octree<LAYOUT_AOS> octreeFileAos;
   octreeFileAos.buildFromFile(buildOptions.info);
+  octreeFileAos.setGeometry(scene.vertices, scene.indices, scene.numTriangles,
+                            scene.numVertices);
   Octree<LAYOUT_SOA> octreeFileSoa;
   octreeFileSoa.copy(octreeFileAos);
+  octreeFileSoa.copyToGpu(d_octree);
+  Octree<LAYOUT_SOA> octreeFileSoaCheck;
+  octreeFileSoaCheck.copyFromGpu(d_octree);
+  std::cout << octreeFileSoaCheck << "\n";
 }
 
-void CUDAOctreeRenderer::build(const int3* indices, const float3* vertices,
-                               Octree<LAYOUT_SOA>* d_octree) {
+void CUDAOctreeRenderer::build(Octree<LAYOUT_SOA>* d_octree) {
   switch (buildOptions.type) {
     case BuildOptions::BUILD_FROM_FILE:
-      buildFromFile(indices, vertices, d_octree);
+      buildFromFile(d_octree);
       break;
     case BuildOptions::BUILD_ON_DEVICE:
-      buildOnDevice(indices, vertices, d_octree);
+      buildOnDevice(d_octree);
       break;
     default:
       break;
@@ -139,11 +140,13 @@ void CUDAOctreeRenderer::traceOnDevice(const int3* indices,
       (rayBuffer.count() + numThreadsPerBlock - 1) / numThreadsPerBlock;
 
   Octree<LAYOUT_SOA>* d_octree = NULL;
-  build(indices, vertices, d_octree);
+  CHK_CUDA(cudaMalloc((void**)(&d_octree), sizeof(Octree<LAYOUT_SOA>)));
+  build(d_octree);
 
   traceKernel << <numBlocks, numThreadsPerBlock>>>
       (rayBuffer.ptr(), indices, vertices, rayBuffer.count(),
        scene.numTriangles, hitBuffer.ptr());
+  Octree<LAYOUT_SOA>::freeOnGpu(d_octree);
 }
 
 }  // namespace oct

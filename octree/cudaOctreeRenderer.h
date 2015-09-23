@@ -43,12 +43,9 @@ class CUDAOctreeRenderer : public RTPSimpleRenderer {
   CUDAOctreeRenderer(const ConfigLoader& config, const BuildOptions& options);
   virtual ~CUDAOctreeRenderer() {}
   void render();
-  void build(const int3* indices, const float3* vertices,
-             Octree<LAYOUT_SOA>* d_octree);
-  void buildOnDevice(const int3* indices, const float3* vertices,
-                     Octree<LAYOUT_SOA>* d_octree);
-  void buildFromFile(const int3* indices, const float3* vertices,
-                     Octree<LAYOUT_SOA>* d_octree);
+  void build(Octree<LAYOUT_SOA>* d_octree);
+  void buildOnDevice(Octree<LAYOUT_SOA>* d_octree);
+  void buildFromFile(Octree<LAYOUT_SOA>* d_octree);
   inline void setBuildOption(const BuildOptions& options) {
     buildOptions = options;
   }
