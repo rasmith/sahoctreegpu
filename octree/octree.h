@@ -9,6 +9,7 @@
 #include <optix_prime.h>
 #include <optixu/optixu_aabb_namespace.h>
 
+#include "log.h"
 #include "define.h"
 
 using optix::Aabb;
@@ -249,13 +250,13 @@ struct NodeStorage<LAYOUT_SOA> {
   }
   static __host__ void freeOnGpu(NodeStorage<LAYOUT_SOA> *d_layout) {
     NodeStorage<LAYOUT_SOA> storageSoa;
-    std::cout << "NodeStorage<LAYOUT_SOA>::freeOnGpu\n";
+    LOG(DEBUG) << "NodeStorage<LAYOUT_SOA>::freeOnGpu\n";
     CHK_CUDA(cudaMemcpy((void *)(&storageSoa), (const void *)(d_layout),
                         sizeof(NodeStorage<LAYOUT_SOA>),
                         cudaMemcpyDeviceToHost));
-    std::cout << "Free headers\n";
+    LOG(DEBUG) << "Free headers\n";
     CHK_CUDA(cudaFree((void *)(storageSoa.headers)));
-    std::cout << "Free footers\n";
+    LOG(DEBUG) << "Free footers\n";
     CHK_CUDA(cudaFree((void *)(storageSoa.footers)));
     storageSoa.headers = NULL;
     storageSoa.footers = NULL;
@@ -341,16 +342,16 @@ struct NodeStorageCopier<LAYOUT_SOA, LAYOUT_SOA> {
   }
   void copyFromGpu(NodeStorage<LAYOUT_SOA> *dest,
                    const NodeStorage<LAYOUT_SOA> *d_src) {
-    std::cout << "NodeStorage<LAYOUT_SOA>::copyFromGpu\n";
-    std::cout << "Copy the number of nodes.\n";
+    LOG(DEBUG) << "NodeStorage<LAYOUT_SOA>::copyFromGpu\n";
+    LOG(DEBUG) << "Copy the number of nodes.\n";
     // Copy the number of nodes.
     CHK_CUDA(cudaMemcpy((void *)(&(dest->numNodes)),
                         (const void *)(&(d_src->numNodes)), sizeof(uint32_t),
                         cudaMemcpyDeviceToHost));
-    std::cout << "Number of nodes = " << dest->numNodes << "\n";
+    LOG(DEBUG) << "Number of nodes = " << dest->numNodes << "\n";
 
     // Copy the headers.
-    std::cout << "Copy the headers.\n";
+    LOG(DEBUG) << "Copy the headers.\n";
     OctNodeHeader *d_headers = NULL;
     if (dest->headers) delete[] dest->headers;
     dest->headers = new OctNodeHeader[dest->numNodes];
@@ -361,7 +362,7 @@ struct NodeStorageCopier<LAYOUT_SOA, LAYOUT_SOA> {
                         cudaMemcpyDeviceToHost));
 
     // Copy the footers.
-    std::cout << "Copy the footers.\n";
+    LOG(DEBUG) << "Copy the footers.\n";
     OctNodeFooterType *d_footers = NULL;
     if (dest->footers) delete[] dest->footers;
     dest->footers = new OctNodeFooterType[dest->numNodes];
@@ -444,9 +445,9 @@ class Octree {
 
   template <Layout OtherNodeLayout>
   bool copy(const Octree<OtherNodeLayout> &octree) {
-    std::cout << "Octree::copy from layout = "
-              << LayoutToString(OtherNodeLayout)
-              << " to layout = " << LayoutToString(NodeLayout) << "\n";
+    LOG(DEBUG) << "Octree::copy from layout = "
+               << LayoutToString(OtherNodeLayout)
+               << " to layout = " << LayoutToString(NodeLayout) << "\n";
     NodeStorageCopier<NodeLayout, OtherNodeLayout> nodeCopier;
     nodeCopier.copy(&m_nodeStorage, &octree.nodeStorage());
     if (octree.triangleIndices()) {
@@ -454,7 +455,7 @@ class Octree {
       m_triangleIndices = new uint32_t[m_numTriangleReferences];
       memcpy(m_triangleIndices, octree.triangleIndices(),
              sizeof(uint32_t) * m_numTriangleReferences);
-      std::cout << "Copied " << m_numTriangleReferences << " references.\n";
+      LOG(DEBUG) << "Copied " << m_numTriangleReferences << " references.\n";
     }
     m_aabb = octree.aabb();
     m_defaultSampleSizeDescriptor = octree.defaultSampleSizeDescriptor();
@@ -467,25 +468,25 @@ class Octree {
     if (NodeLayout == LAYOUT_SOA) {
       uint32_t nodeCount =
           (m_nodeStorage.numNodes < 10 ? m_nodeStorage.numNodes : 10);
-      std::cout << "numNodes = " << m_nodeStorage.numNodes << "\n";
+      LOG(DEBUG) << "numNodes = " << m_nodeStorage.numNodes << "\n";
       for (int i = 0; i < nodeCount; ++i) {
         OctNode128 node;
         node.footer = m_nodeStorage.footers[i];
         node.header = m_nodeStorage.headers[i];
-        std::cout << node << "\n";
+        LOG(DEBUG) << node << "\n";
       }
     }
     return true;
   }
 
   __host__ void copyToGpu(Octree<NodeLayout> *d_octree) const {
-    std::cout << "copyToGpu\n";
+    LOG(DEBUG) << "copyToGpu\n";
     // Copy the storage to GPU.
     NodeStorageCopier<NodeLayout, NodeLayout> nodeCopier;
     nodeCopier.copyToGpu(&(d_octree->m_nodeStorage), &m_nodeStorage);
 
     // Copy triangle references to GPU.
-    std::cout << "copy triangle references\n";
+    LOG(DEBUG) << "copy triangle references\n";
     uint32_t *d_triangleIndices = NULL;
     CHK_CUDA(cudaMalloc((void **)(&d_triangleIndices),
                         sizeof(uint32_t) * m_numTriangleReferences));
@@ -502,30 +503,30 @@ class Octree {
                         sizeof(uint32_t), cudaMemcpyHostToDevice));
 
     // Copy AABB to GPU.
-    std::cout << "copy aabb\n";
+    LOG(DEBUG) << "copy aabb\n";
     CHK_CUDA(cudaMemcpy((void *)(&(d_octree->m_aabb)), (const void *)(&m_aabb),
                         sizeof(Aabb), cudaMemcpyHostToDevice));
 
     // Copy default size descriptor to GPU.
-    std::cout << "copy size descriptor\n";
+    LOG(DEBUG) << "copy size descriptor\n";
     CHK_CUDA(cudaMemcpy((void *)(&(d_octree->m_defaultSampleSizeDescriptor)),
                         (const void *)(&m_defaultSampleSizeDescriptor),
                         sizeof(uint32_t), cudaMemcpyHostToDevice));
 
     // Copy max depth to GPU.
-    std::cout << "copy max depth\n";
+    LOG(DEBUG) << "copy max depth\n";
     CHK_CUDA(cudaMemcpy((void *)(&(d_octree->m_maxDepth)),
                         (const void *)(&m_maxDepth), sizeof(uint32_t),
                         cudaMemcpyHostToDevice));
 
     // Copy max leaf size to GPU.
-    std::cout << "copy max leaf size\n";
+    LOG(DEBUG) << "copy max leaf size\n";
     CHK_CUDA(cudaMemcpy((void *)(&(d_octree->m_maxLeafSize)),
                         (const void *)(&m_maxLeafSize), sizeof(uint32_t),
                         cudaMemcpyHostToDevice));
 
     // Copy vertices to GPU.
-    std::cout << "copy vertices\n";
+    LOG(DEBUG) << "copy vertices\n";
     float3 *d_vertices = NULL;
     CHK_CUDA(
         cudaMalloc((void **)(&d_vertices), sizeof(float3) * m_numVertices));
@@ -537,7 +538,7 @@ class Octree {
                         cudaMemcpyHostToDevice));
 
     // Copy indices to GPU.
-    std::cout << "copy indices\n";
+    LOG(DEBUG) << "copy indices\n";
     int3 *d_indices = NULL;
     CHK_CUDA(cudaMalloc((void **)(&d_indices), sizeof(int3) * m_numTriangles));
     CHK_CUDA(cudaMemcpy((void *)(d_indices), (const void *)(m_indices),
@@ -547,37 +548,38 @@ class Octree {
                         cudaMemcpyHostToDevice));
 
     // Copy num triangles to GPU.
-    std::cout << "copy num triangles\n";
-    std::cout << "m_numTriangles = " << m_numTriangles << "\n";
+    LOG(DEBUG) << "copy num triangles\n";
+    LOG(DEBUG) << "m_numTriangles = " << m_numTriangles << "\n";
     CHK_CUDA(cudaMemcpy((void *)(&(d_octree->m_numTriangles)),
                         (const void *)(&m_numTriangles), sizeof(uint32_t),
                         cudaMemcpyHostToDevice));
 
     // Copy num vertices to GPU.
-    std::cout << "copy num vertices\n";
-    std::cout << "m_numVertices = " << m_numVertices << "\n";
+    LOG(DEBUG) << "copy num vertices\n";
+    LOG(DEBUG) << "m_numVertices = " << m_numVertices << "\n";
     CHK_CUDA(cudaMemcpy((void *)(&(d_octree->m_numVertices)),
                         (const void *)(&m_numVertices), sizeof(uint32_t),
                         cudaMemcpyHostToDevice));
-    std::cout << "done!\n";
+    LOG(DEBUG) << "done!\n";
   }
 
   __host__ void copyFromGpu(const Octree<NodeLayout> *d_octree) {
-    std::cout << "Octree<" << NodeLayout << ">::copyFromGpu\n";
+    LOG(DEBUG) << "Octree<" << NodeLayout << ">::copyFromGpu\n";
     // Copy the storage to CPU.
-    std::cout << "Copy the storage to CPU.\n";
+    LOG(DEBUG) << "Copy the storage to CPU.\n";
     NodeStorageCopier<NodeLayout, NodeLayout> nodeCopier;
     nodeCopier.copyFromGpu(&m_nodeStorage, &(d_octree->m_nodeStorage));
 
     // Copy num triangle references to CPU.
-    std::cout << "Copy num triangle references to CPU.\n";
+    LOG(DEBUG) << "Copy num triangle references to CPU.\n";
     CHK_CUDA(cudaMemcpy((void *)(&m_numTriangleReferences),
                         (void *)(&(d_octree->m_numTriangleReferences)),
                         sizeof(uint32_t), cudaMemcpyDeviceToHost));
-    std::cout << "Num triangle references: " << m_numTriangleReferences << "\n";
+    LOG(DEBUG) << "Num triangle references: " << m_numTriangleReferences
+               << "\n";
 
     // Copy triangle references to CPU.
-    std::cout << "Copy triangle references to CPU.\n";
+    LOG(DEBUG) << "Copy triangle references to CPU.\n";
     uint32_t *d_triangleIndices = NULL;
     CHK_CUDA(cudaMemcpy((void *)(&d_triangleIndices),
                         (const void *)(&(d_octree->m_triangleIndices)),
@@ -589,45 +591,45 @@ class Octree {
         sizeof(uint32_t) * m_numTriangleReferences, cudaMemcpyDeviceToHost));
 
     // Copy AABB to CPU.
-    std::cout << "Copy AABB to CPU.\n";
+    LOG(DEBUG) << "Copy AABB to CPU.\n";
     CHK_CUDA(cudaMemcpy((void *)(&m_aabb), (const void *)(&(d_octree->m_aabb)),
                         sizeof(Aabb), cudaMemcpyDeviceToHost));
 
     // Copy default size descriptor to CPU.
-    std::cout << "Copy default size descriptor to CPU.\n";
+    LOG(DEBUG) << "Copy default size descriptor to CPU.\n";
     CHK_CUDA(
         cudaMemcpy((void *)(&m_defaultSampleSizeDescriptor),
                    (const void *)(&(d_octree->m_defaultSampleSizeDescriptor)),
                    sizeof(uint32_t), cudaMemcpyDeviceToHost));
 
     // Copy max depth to CPU.
-    std::cout << "Copy max depth to CPU.\n";
+    LOG(DEBUG) << "Copy max depth to CPU.\n";
     CHK_CUDA(cudaMemcpy((void *)(&m_maxDepth),
                         (const void *)(&(d_octree->m_maxDepth)),
                         sizeof(uint32_t), cudaMemcpyDeviceToHost));
 
     // Copy max leaf size to CPU.
-    std::cout << "Copy max leaf size to CPU.\n";
+    LOG(DEBUG) << "Copy max leaf size to CPU.\n";
     CHK_CUDA(cudaMemcpy((void *)(&m_maxLeafSize),
                         (const void *)(&(d_octree->m_maxLeafSize)),
                         sizeof(uint32_t), cudaMemcpyDeviceToHost));
 
     // Copy num triangles to CPU.
-    std::cout << "Copy num triangles to CPU.\n";
+    LOG(DEBUG) << "Copy num triangles to CPU.\n";
     CHK_CUDA(cudaMemcpy((void *)(&m_numTriangles),
                         (const void *)(&(d_octree->m_numTriangles)),
                         sizeof(uint32_t), cudaMemcpyDeviceToHost));
-    std::cout << "Num triangles = " << m_numTriangles << ".\n";
+    LOG(DEBUG) << "Num triangles = " << m_numTriangles << ".\n";
 
     // Copy num vertices to CPU.
-    std::cout << "Copy num vertices to CPU.\n";
+    LOG(DEBUG) << "Copy num vertices to CPU.\n";
     CHK_CUDA(cudaMemcpy((void *)(&m_numVertices),
                         (const void *)(&(d_octree->m_numVertices)),
                         sizeof(uint32_t), cudaMemcpyDeviceToHost));
-    std::cout << "Num vertices  = " << m_numVertices << ".\n";
+    LOG(DEBUG) << "Num vertices  = " << m_numVertices << ".\n";
 
     // Copy vertices to CPU.
-    std::cout << "Copy vertices to CPU.\n";
+    LOG(DEBUG) << "Copy vertices to CPU.\n";
     float3 *d_vertices = NULL;
     if (m_vertices) delete[] m_vertices;
     m_vertices = new float3[m_numVertices];
@@ -640,7 +642,7 @@ class Octree {
                         cudaMemcpyDeviceToHost));
 
     // Copy indices to CPU.
-    std::cout << "Copy indices to CPU.\n";
+    LOG(DEBUG) << "Copy indices to CPU.\n";
     int3 *d_indices = NULL;
     if (m_indices) delete[] m_indices;
     m_indices = new int3[m_numTriangles];
@@ -650,7 +652,7 @@ class Octree {
                         cudaMemcpyDeviceToHost));
     CHK_CUDA(cudaMemcpy((void *)(m_indices), (const void *)(d_indices),
                         sizeof(int3) * m_numTriangles, cudaMemcpyDeviceToHost));
-    std::cout << "done!\n";
+    LOG(DEBUG) << "done!\n";
   }
 
   static __host__ void freeOnGpu(Octree<NodeLayout> *d_octree) {
@@ -658,17 +660,17 @@ class Octree {
     NodeStorage<NodeLayout>::freeOnGpu(&(d_octree->m_nodeStorage));
     CHK_CUDA(cudaMemcpy((void *)(&octree), (void *)(d_octree),
                         sizeof(Octree<NodeLayout>), cudaMemcpyDeviceToHost));
-    std::cout << "Free triangle references.\n";
+    LOG(DEBUG) << "Free triangle references.\n";
     CHK_CUDA(cudaFree((void *)(octree.m_triangleIndices)));
-    std::cout << "Free vertices.\n";
+    LOG(DEBUG) << "Free vertices.\n";
     CHK_CUDA(cudaFree((void *)(octree.m_vertices)));
-    std::cout << "Free indices.\n";
+    LOG(DEBUG) << "Free indices.\n";
     CHK_CUDA(cudaFree((void *)(octree.m_indices)));
     octree.m_nodeStorage = NodeStorage<NodeLayout>();
     octree.m_triangleIndices = NULL;
     octree.m_vertices = NULL;
     octree.m_indices = NULL;
-    std::cout << "Done!\n";
+    LOG(DEBUG) << "Done!\n";
   }
 
   void print(std::ostream &os) const {

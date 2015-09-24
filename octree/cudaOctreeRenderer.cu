@@ -1,5 +1,8 @@
 #include "cudaOctreeRenderer.h"
+
 #include <nppdefs.h>
+
+#include "log.h"
 #include "octree.h"
 
 #define kEpsilon 1e-18
@@ -116,7 +119,7 @@ void CUDAOctreeRenderer::buildFromFile(Octree<LAYOUT_SOA>* d_octree) {
   octreeFileSoa.copyToGpu(d_octree);
   Octree<LAYOUT_SOA> octreeFileSoaCheck;
   octreeFileSoaCheck.copyFromGpu(d_octree);
-  std::cout << octreeFileSoaCheck << "\n";
+  LOG(DEBUG) << octreeFileSoaCheck << "\n";
 }
 
 void CUDAOctreeRenderer::build(Octree<LAYOUT_SOA>* d_octree) {
