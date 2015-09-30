@@ -30,6 +30,7 @@
 #include "configLoader.h"
 #include "rtpSimpleRenderer.h"
 #include "cudaSimpleRenderer.h"
+#include "cudaOctreeRenderer.h"
 
 void printUsageAndExit(const char* argv0) {
   std::cerr
@@ -47,12 +48,13 @@ void printUsageAndExit(const char* argv0) {
   << "          cpu_rtp_simple  : simple ray tracing on CPU using RTP (default)\n"
   << "          gpu_rtp_simple  : simple ray tracing on GPU using RTP\n"
   << "          gpu_cuda_simple : simple ray tracing on GPU using CUDA\n"
+  << "          gpu_cuda_octree : ray tracing on GPU using CUDA (statically built octree)\n"
   << std::endl;
   
   exit(1);
 }
 
-enum RendererType { CPU_RTP_SIMPLE, GPU_RTP_SIMPLE, GPU_CUDA_SIMPLE };
+enum RendererType { CPU_RTP_SIMPLE, GPU_RTP_SIMPLE, GPU_CUDA_SIMPLE, GPU_CUDA_OCTREE };
 
 int main( int argc, char** argv )
 {
@@ -119,6 +121,8 @@ int main( int argc, char** argv )
         rtype = GPU_RTP_SIMPLE;
       } else if (type.compare("gpu_cuda_simple")) {
         rtype = GPU_CUDA_SIMPLE;
+      } else if (type.compare("gpu_cuda_octree")) {
+        rtype = GPU_CUDA_OCTREE;
       }
     } else {
       std::cerr << "Bad option: '" << arg << "'" << std::endl;
@@ -136,10 +140,14 @@ int main( int argc, char** argv )
     renderer = new RTPSimpleRenderer(config);
   } else if (rtype == GPU_CUDA_SIMPLE) {
     renderer = new CUDASimpleRenderer(config);
+  } else if (rtype == GPU_CUDA_OCTREE) {
+    renderer = new CUDAOctreeRenderer(config);
   } else {
     renderer = new RTPSimpleRenderer(config);
   }
   renderer->render();
   renderer->shade();
   renderer->write();
+
+  delete renderer;
 }

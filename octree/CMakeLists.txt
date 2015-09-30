@@ -21,23 +21,28 @@
 
 set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/rtpSimpleRenderer.cu
                             ${CMAKE_CURRENT_SOURCE_DIR}/cudaSimpleRenderer.cu
+                            ${CMAKE_CURRENT_SOURCE_DIR}/cudaOctreeRenderer.cu
                             PROPERTIES CUDA_SOURCE_PROPERTY_FORMAT OBJ)
 
 # See top level CMakeLists.txt file for documentation of OPTIX_add_sample_executable.
 OPTIX_add_sample_executable( octree
   buffer.h
   configLoader.h
+  cpuSimpleRenderer.h
   cudaSimpleRenderer.h
+  cudaOctreeRenderer.h
   define.h
   image.h
   renderer.h
   rtpSimpleRenderer.h
   sceneLoader.h
   cudaSimpleRenderer.cu
+  cudaOctreeRenderer.cu
+  rtpSimpleRenderer.cu
+  cpuSimpleRenderer.cpp
   image.cpp
   main.cpp
   renderer.cpp
-  rtpSimpleRenderer.cu
   sceneLoader.cpp
   )
 
