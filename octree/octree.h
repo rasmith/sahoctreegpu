@@ -433,8 +433,10 @@ class Octree {
     if (m_owns_indices && m_indices) delete[] m_indices;
   }
 
-  void setGeometry(const float3 *vertices, const int3 *indices,
-                   uint32_t numTriangles, uint32_t numVertices) {
+  inline __device__ __host__ void setGeometry(const float3 *vertices,
+                                              const int3 *indices,
+                                              uint32_t numTriangles,
+                                              uint32_t numVertices) {
     m_vertices = vertices;
     m_indices = indices;
     m_numTriangles = numTriangles;
@@ -444,7 +446,7 @@ class Octree {
   __host__ inline bool buildFromFile(const char *fileName) { return false; }
 
   template <Layout OtherNodeLayout>
-  bool copy(const Octree<OtherNodeLayout> &octree) {
+  __host__ bool copy(const Octree<OtherNodeLayout> &octree) {
     LOG(DEBUG) << "Octree::copy from layout = "
                << LayoutToString(OtherNodeLayout)
                << " to layout = " << LayoutToString(NodeLayout) << "\n";
@@ -673,7 +675,7 @@ class Octree {
     LOG(DEBUG) << "Done!\n";
   }
 
-  void print(std::ostream &os) const {
+  void __host__ print(std::ostream &os) const {
     os << "m_nodeStorage = " << m_nodeStorage << "\n";
     os << "m_numTriangleReferences = " << m_numTriangleReferences << "\n";
     uint32_t count =
@@ -703,29 +705,38 @@ class Octree {
     os << "\n";
   }
 
-  inline friend std::ostream &operator<<(std::ostream &os,
-                                         const OctreeType &octree) {
+  inline __host__ friend std::ostream &operator<<(std::ostream &os,
+                                                  const OctreeType &octree) {
     octree.print(os);
     return os;
   }
 
-  inline const NodeStorage<NodeLayout> &nodeStorage() const {
+  inline __device__ __host__ const NodeStorage<NodeLayout> &nodeStorage()
+      const {
     return m_nodeStorage;
   }
   inline const uint32_t *triangleIndices() const { return m_triangleIndices; }
   inline uint32_t numTriangleReferences() const {
     return m_numTriangleReferences;
   }
-  inline const Aabb &aabb() const { return m_aabb; }
-  inline uint32_t defaultSampleSizeDescriptor() const {
+  inline __device__ __host__ const Aabb &aabb() const { return m_aabb; }
+  inline __device__ __host__ uint32_t defaultSampleSizeDescriptor() const {
     return m_defaultSampleSizeDescriptor;
   }
-  inline uint32_t maxDepth() const { return m_maxDepth; }
-  inline uint32_t maxLeafSize() const { return m_maxLeafSize; }
-  inline const int3 *indices() const { return m_indices; }
-  inline const float3 *vertices() const { return m_vertices; }
-  inline uint32_t numTriangles() const { return m_numTriangles; }
-  inline uint32_t numVertices() const { return m_numVertices; }
+  inline __device__ __host__ uint32_t maxDepth() const { return m_maxDepth; }
+  inline __device__ __host__ uint32_t maxLeafSize() const {
+    return m_maxLeafSize;
+  }
+  inline __device__ __host__ const int3 *indices() const { return m_indices; }
+  inline __device__ __host__ const float3 *vertices() const {
+    return m_vertices;
+  }
+  inline __device__ __host__ uint32_t numTriangles() const {
+    return m_numTriangles;
+  }
+  inline __device__ __host__ uint32_t numVertices() const {
+    return m_numVertices;
+  }
 
  private:
   NodeStorageType m_nodeStorage;
@@ -745,6 +756,28 @@ class Octree {
 
 template <>
 __host__ bool Octree<LAYOUT_AOS>::buildFromFile(const char *fileName);
+
+enum OctreeEventType {
+  OCTREE_EVENT_X,
+  OCTREE_EVENT_Y,
+  OCTREE_EVENT_Z,
+  OCTREE_EVENT_ENTRY,
+  OCTREE_EVENT_EXIT,
+  OCTREE_EVENT_NONE
+};
+
+struct OctreeEvent {
+  OctreeEventType type;
+  unsigned char mask;
+  float t;
+};
+
+struct OctreeEventComparator {
+  inline __device__ __host__ bool operator()(const OctreeEvent &a,
+                                             const OctreeEvent &b) const {
+    return a.t < b.t;
+  }
+};
 
 }  // namespace oct
 
