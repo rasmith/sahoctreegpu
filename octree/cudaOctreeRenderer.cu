@@ -10,8 +10,8 @@
 
 namespace oct {
 
-inline __device__ __host__ Aabb getChildBounds(const Aabb& bounds, const float3& center,
-                    uint32_t octant) {
+inline __device__ __host__ Aabb
+getChildBounds(const Aabb& bounds, const float3& center, uint32_t octant) {
   Aabb result;
   float3 min = bounds[0];
   float3 max = bounds[1];
@@ -31,7 +31,8 @@ inline __device__ __host__ bool isValidT(float t, float t_near, float t_far) {
 }
 
 template <typename T>
-inline __device__ __host__ void exchangeIf(bool condition, T* temp, T* x, T* y) {
+inline __device__ __host__ void exchangeIf(bool condition, T* temp, T* x,
+                                           T* y) {
   uintptr_t c = condition;
   c -= 1;
   *temp = *x;
@@ -42,8 +43,10 @@ inline __device__ __host__ void exchangeIf(bool condition, T* temp, T* x, T* y) 
 }
 
 template <>
-inline __device__ __host__ void exchangeIf<unsigned char>(bool condition, unsigned char* temp,
-                                      unsigned char* x, unsigned char* y) {
+inline __device__ __host__ void exchangeIf<unsigned char>(bool condition,
+                                                          unsigned char* temp,
+                                                          unsigned char* x,
+                                                          unsigned char* y) {
   unsigned char c = condition;
   c -= 1;
   *temp = *x;
@@ -52,7 +55,8 @@ inline __device__ __host__ void exchangeIf<unsigned char>(bool condition, unsign
 }
 
 template <typename T, typename Comparator>
-inline __device__ __host__ void compareExchange(const Comparator& c, T* temp, T* x, T* y) {
+inline __device__ __host__ void compareExchange(const Comparator& c, T* temp,
+                                                T* x, T* y) {
   bool lessThan = c(*y, *x);
   exchangeIf(lessThan, temp, x, y);
 }
@@ -88,7 +92,8 @@ inline __device__ __host__ void updateClosest(const Hit& isect, Hit& closest) {
   closest.v = isect.v;
 }
 
-inline __device__ __host__ void updateHitBuffer(const Hit& closest, Hit* hitBuf) {
+inline __device__ __host__ void updateHitBuffer(const Hit& closest,
+                                                Hit* hitBuf) {
   hitBuf->t = closest.t;
   hitBuf->triId = closest.triId;
   hitBuf->u = closest.u;
@@ -96,9 +101,10 @@ inline __device__ __host__ void updateHitBuffer(const Hit& closest, Hit* hitBuf)
 }
 
 inline __device__ __host__ bool intersectAabb(const float3& origin,
-                                     const float3& invDirection,
-                                     const Aabb& bounds, float t0, float t1,
-                                     float* tNear, float* tFar) {
+                                              const float3& invDirection,
+                                              const Aabb& bounds, float t0,
+                                              float t1, float* tNear,
+                                              float* tFar) {
   int s[3] = {invDirection.x < 0, invDirection.y < 0, invDirection.z < 0};
   *tNear = (bounds[s[0]].x - origin.x) * invDirection.x;
   *tFar = (bounds[1 - s[0]].x - origin.x) * invDirection.x;
@@ -119,9 +125,10 @@ inline __device__ __host__ bool intersectAabb(const float3& origin,
   return *tNear < t1 && *tFar > t0;
 }
 
-inline __device__ __host__ bool intersectTriangle(const Ray& ray, const int3* indices,
-                                         const float3* vertices,
-                                         const int triId, Hit& isect) {
+inline __device__ __host__ bool intersectTriangle(const Ray& ray,
+                                                  const int3* indices,
+                                                  const float3* vertices,
+                                                  const int triId, Hit& isect) {
   const int3 tri = indices[triId];
   const float3 a = vertices[tri.x];
   const float3 b = vertices[tri.y];
@@ -149,12 +156,10 @@ inline __device__ __host__ bool intersectTriangle(const Ray& ray, const int3* in
   return true;
 }
 
-inline __host__ __device__ __host__ void createEvents(const float3& origin,
-                                    const float3& direction,
-                                    const float3& invDirection,
-                                    const float3& center, const float3& hit,
-                                    float tNear, float tFar,
-                                    OctreeEvent* events, int* N) {
+inline __host__ __device__ __host__ void createEvents(
+    const float3& origin, const float3& direction, const float3& invDirection,
+    const float3& center, const float3& hit, float tNear, float tFar,
+    OctreeEvent* events, int* N) {
   // Compute the default entry point.
   unsigned char xBit = (hit.x > center.x);
   unsigned char yBit = (hit.y > center.y);
@@ -312,11 +317,26 @@ inline __host__ __device__ __host__ void createEvents(const float3& origin,
   events[0].mask = events[0].mask ^ mask;
 }
 
-inline __device__ __host__ void getChildren(const OctNodeHeader* header,
-                                   const OctNodeFooter<uint64_t>* footer,
-                                   const OctNodeHeader* headers,
-                                   uint32_t* children,
-                                   unsigned char* hasChildBitmask) {
+inline float3 __device__ __host__
+getSplitPoint(const OctNodeHeader* header,
+              const OctNodeFooter<uint64_t>* footer, const Aabb& bounds) {
+  float3 min = bounds[0];
+  float3 max = bounds[1];
+  uint32_t num_samples = footer->internal.sizeDescriptor;
+  if (num_samples <= 1) return 0.5f * (min + max);
+  float inv = 1.0 / (num_samples - 1);
+  float3 step_size = inv * (max - min);
+  float3 split_point =
+      make_float3(footer->internal.i, footer->internal.j, footer->internal.k);
+  split_point *= step_size;
+  split_point += min;
+  return split_point;
+}
+
+inline __device__ __host__ void getChildren(
+    const OctNodeHeader* header, const OctNodeFooter<uint64_t>* footer,
+    const OctNodeHeader* headers, uint32_t* children,
+    unsigned char* hasChildBitmask) {
   uint32_t numChildren = static_cast<uint32_t>(footer->internal.numChildren);
   uint32_t offset = static_cast<uint32_t>(header->offset);
   unsigned char maskResult = 0x0;
@@ -327,26 +347,17 @@ inline __device__ __host__ void getChildren(const OctNodeHeader* header,
   *hasChildBitmask = maskResult;
 }
 
-inline __device__ __host__ bool intersectOctree(const Ray& ray, const int3* indices,
-                                       const float3* vertices,
-                                       const Octree<LAYOUT_SOA>* octree,
-                                       Hit& closest) {
-  const OctNodeHeader* headers = octree->nodeStorage().headers;
-  const OctNodeFooter<uint64_t>* footers = octree->nodeStorage().footers;
-  const Aabb& aabb = octree->aabb();
-  const OctNodeHeader* currentHeader = headers;
-  const OctNodeFooter<uint64_t>* currentFooter = footers;
-  const int MAX_CHILDREN = 4;
-  const int MAX_DEPTH = 15;
-  const uint32_t STACK_SIZE = MAX_CHILDREN * MAX_DEPTH;
+inline __device__ __host__ bool intersectOctree(
+    const Ray& ray, const int3* indices, const float3* vertices,
+    const Octree<LAYOUT_SOA>* octree, Hit& closest) {
+  const uint32_t kMaxDepth = 20;
+  const uint32_t kMaxEvents = 4;
+  const uint32_t kStackSize = kMaxEvents * kMaxDepth;
 
   // NOTE:
   //    1) We need to examine 4 nodes per octree node.
-  //    2) Because of (1), we need to put at most 3 nodes on the
-  //       stack for each internal node.
-  //    3) We do not put the root on the stack, nor do we put any leaf.
-  //    4) Because of (1)-(4), we create a stack of size:
-  //          3 * (d - 1) * B
+  //    4) Because of (1), we create a stack of size:
+  //          4 * d  * B
   //    where we need B bytes per node to store a reference on the stack.
   // Here B = 4, since unsigned ints will be used.
   //
@@ -358,13 +369,15 @@ inline __device__ __host__ bool intersectOctree(const Ray& ray, const int3* indi
   // many threads may fetch the same node, so it might be best to let
   // the GPU manage the cache on its own and hopefully we only fetch
   // each node that we actually need.
-  int nodeIdStack[STACK_SIZE];
-  Aabb aabbStack[STACK_SIZE];
-  float tNearStack[STACK_SIZE];
-  float tFarStack[STACK_SIZE];
+
+  const OctNodeHeader* headers = octree->nodeStorage().headers;
+  const OctNodeFooter<uint64_t>* footers = octree->nodeStorage().footers;
+  int nodeIdStack[kStackSize];
+  Aabb aabbStack[kStackSize];
+  float tNearStack[kStackSize];
+  float tFarStack[kStackSize];
   int stackEnd = 1;
-  unsigned char octantBits =
-      0x0;  // bitmask which encodes which octants we have
+  unsigned char octantBits = 0x0;  // bitmask encodes which children
   bool terminateRay = false;
   uint32_t children[8];
   OctreeEvent events[5];
@@ -375,38 +388,37 @@ inline __device__ __host__ bool intersectOctree(const Ray& ray, const int3* indi
   float tNear = 0.0f, tFar = 0.0f;
   Aabb currentBounds;
   float3 center;
-  float3 origin = ray.origin;
-  float3 direction = ray.dir;
-  float3 invDirection =
-      make_float3(1.0f / direction.x, 1.0f / direction.y, 1.0f / direction.z);
   float3 hit = make_float3(0.0f, 0.0f, 0.0f);
+  float3 invDirection =
+      make_float3(1.0f / ray.dir.x, 1.0f / ray.dir.y, 1.0f / ray.dir.z);
   bool stackEmpty = false;
   bool triangleHit = false;
+  const OctNodeHeader* currentHeader = NULL;
+  const OctNodeFooter<uint64_t>* currentFooter = NULL;
+  bool objectHit = false;
   Hit isect;
-  closest.t = NPP_MAXABS_32F;
-  closest.triId = -1;
 
   // Put the root onto the stack.
   nodeIdStack[0] = 0;
-  aabbStack[0] = aabb;
+  aabbStack[0] = octree->aabb();
+  intersectAabb(ray.origin, invDirection, aabbStack[0], 0.0f, NPP_MAXABS_32F,
+                &tNearStack[0], &tFarStack[0]);
 
-  // Do initial AABB intersection on root.
-  terminateRay = intersectAabb(origin, invDirection, aabb, 0.0f, FLT_MAX,
-                               &tNearStack[0], &tFarStack[0]);
   while (!terminateRay) {
     while (!(stackEmpty = (stackEnd <= 0)) &&
            !(headers[currentId = nodeIdStack[--stackEnd]].type == NODE_LEAF)) {
       // Get current node to process.
-      tNear = tNearStack[stackEnd];
-      tFar = tFarStack[stackEnd];
-      currentBounds = aabbStack[stackEnd];
       currentHeader = &headers[currentId];
       currentFooter = &footers[currentId];
-      hit = origin + tNear * direction;
-      center = 0.5f * (aabb[0] + aabb[1]);
+      currentBounds = aabbStack[stackEnd];
+      tNear = tNearStack[stackEnd];
+      tFar = tFarStack[stackEnd];
+      hit = ray.origin + tNear * ray.dir;
+      center = getSplitPoint(currentHeader, currentFooter, currentBounds);
       //  Get the events, in order of they are hit.
-      createEvents(origin, direction, invDirection, center, hit, tNear, tFar,
+      createEvents(ray.origin, ray.dir, invDirection, center, hit, tNear, tFar,
                    events, &numEvents);
+      octantBits = 0x0;
       // Get children.
       getChildren(currentHeader, currentFooter, headers, children, &octantBits);
       // Figure out which octants that were hit are actually occupied by a
@@ -414,25 +426,32 @@ inline __device__ __host__ bool intersectOctree(const Ray& ray, const int3* indi
       octant = 0x0;
       numValidEvents = 0;
       for (uint32_t i = 0; i < numEvents - 1; ++i) {
+        octant = octant ^ events[i].mask;
         bool hasChild = ((octantBits & (0x1 << octant)) != 0);
         numValidEvents += hasChild;
       }
       // Add the children in reverse order of being hit to the stack.  This way,
       // the child that was hit first gets popped first.
-      for (uint32_t i = 0; i < numEvents - 1; ++i) {
+      int k = -1;  // keep track of which valid event we have
+      octant = 0x0;
+      for (uint32_t i = 0; i < numEvents - 1 && k + 1 < numValidEvents; ++i) {
         octant = octant ^ events[i].mask;
         bool hasChild = ((octantBits & (0x1 << octant)) != 0);
+        k += hasChild;
+        int nextStack = stackEnd + numValidEvents - k - 1;
         if (hasChild) {
-          nodeIdStack[stackEnd + numValidEvents - i] = children[octant];
-          aabbStack[stackEnd + numValidEvents - i] =
-              getChildBounds(aabb, center, octant);
-          tNearStack[stackEnd + numValidEvents - i] = events[i].t;
-          tFarStack[stackEnd + numValidEvents - i] = events[i + 1].t;
+          nodeIdStack[nextStack] = children[octant];
+          aabbStack[nextStack] = getChildBounds(currentBounds, center, octant);
+          tNearStack[nextStack] = events[i].t;
+          tFarStack[nextStack] = events[i + 1].t;
         }
       }
       stackEnd += numValidEvents;
     }
-    uint32_t numPrimitives = (stackEmpty ? 0: footers[currentId].leaf.size);
+    uint32_t numPrimitives = (stackEmpty ? 0 : footers[currentId].leaf.size);
+    tNear = (stackEmpty ? 0.0f : tNearStack[stackEnd]);
+    tFar = (stackEmpty ? 0.0f : tFarStack[stackEnd]);
+    triangleHit = false;
     for (uint32_t i = 0; i < numPrimitives; ++i) {
       if (intersectTriangle(ray, indices, vertices, i, isect) &&
           isect.t < closest.t) {
@@ -440,115 +459,117 @@ inline __device__ __host__ bool intersectOctree(const Ray& ray, const int3* indi
         triangleHit = true;
       }
     }
+    objectHit = triangleHit && closest.t >= tNear && closest.t <= tFar;
+    terminateRay = objectHit || stackEmpty;
   }
-  return triangleHit;
+  return objectHit;
 }
 
-#define USE_OCTREE 
- __global__ void traceKernel(const Ray * rays, const int3 * indices,
-                              const float3 * vertices, const int rayCount,
-                              const Octree<LAYOUT_SOA> * octree,
-                              const int triCount, Hit * hits) {
-    int rayIdx = threadIdx.x + blockIdx.x * blockDim.x;
+#define USE_OCTREE
+__global__ void traceKernel(const Ray* rays, const int3* indices,
+                            const float3* vertices, const int rayCount,
+                            const Octree<LAYOUT_SOA>* octree,
+                            const int triCount, Hit* hits) {
+  int rayIdx = threadIdx.x + blockIdx.x * blockDim.x;
 
-    if (rayIdx >= rayCount) {
-      return;
-    }
+  if (rayIdx >= rayCount) {
+    return;
+  }
 
-    Hit closest;
-    Hit isect;
-    closest.t = NPP_MAXABS_32F;
-    closest.triId = -1;
-    const Ray& ray = *(rays + rayIdx);
+  Hit closest;
+  Hit isect;
+  closest.t = NPP_MAXABS_32F;
+  closest.triId = -1;
+  const Ray& ray = *(rays + rayIdx);
 #ifdef USE_OCTREE
-    if (intersectOctree(ray, indices, vertices, octree, isect) &&
+  if (intersectOctree(ray, indices, vertices, octree, isect) &&
+      isect.t < closest.t) {
+    updateClosest(isect, closest);
+  }
+#else
+  for (int t = 0; t < triCount; ++t) {  // triangles
+    if (intersectTriangle(ray, indices, vertices, t, isect) &&
         isect.t < closest.t) {
       updateClosest(isect, closest);
     }
-#else
-    for (int t = 0; t < triCount; ++t) {  // triangles
-      if (intersectTriangle(ray, indices, vertices, t, isect) &&
-          isect.t < closest.t) {
-        updateClosest(isect, closest);
-      }
-    }
+  }
 #endif
-    updateHitBuffer(closest, (hits + rayIdx));
+  updateHitBuffer(closest, (hits + rayIdx));
+}
+
+CUDAOctreeRenderer::CUDAOctreeRenderer(const ConfigLoader& config)
+    : RTPSimpleRenderer(config) {}
+
+CUDAOctreeRenderer::CUDAOctreeRenderer(const ConfigLoader& config,
+                                       const BuildOptions& options)
+    : RTPSimpleRenderer(config), buildOptions(options) {}
+
+void CUDAOctreeRenderer::render() {
+  int3* d_indices;
+  float3* d_vertices;
+  // int rounded_length = nextPow2(length);
+
+  CHK_CUDA(cudaMalloc((void**)&d_indices, scene.numTriangles * sizeof(int3)));
+  CHK_CUDA(
+      cudaMalloc((void**)&d_vertices, scene.numTriangles * sizeof(float3)));
+
+  CHK_CUDA(cudaMemcpy(d_indices, scene.indices,
+                      scene.numTriangles * sizeof(int3),
+                      cudaMemcpyHostToDevice));
+  CHK_CUDA(cudaMemcpy(d_vertices, scene.vertices,
+                      scene.numTriangles * sizeof(float3),
+                      cudaMemcpyHostToDevice));
+
+  traceOnDevice(d_indices, d_vertices);
+
+  cudaFree(d_indices);
+  cudaFree(d_vertices);
+}
+
+void CUDAOctreeRenderer::buildOnDevice(Octree<LAYOUT_SOA>* d_octree) {}
+
+void CUDAOctreeRenderer::buildFromFile(Octree<LAYOUT_SOA>* d_octree) {
+  Octree<LAYOUT_AOS> octreeFileAos;
+  octreeFileAos.buildFromFile(buildOptions.info);
+  octreeFileAos.setGeometry(scene.vertices, scene.indices, scene.numTriangles,
+                            scene.numVertices);
+  Octree<LAYOUT_SOA> octreeFileSoa;
+  octreeFileSoa.copy(octreeFileAos);
+  octreeFileSoa.copyToGpu(d_octree);
+  Octree<LAYOUT_SOA> octreeFileSoaCheck;
+  octreeFileSoaCheck.copyFromGpu(d_octree);
+  LOG(DEBUG) << octreeFileSoaCheck << "\n";
+}
+
+void CUDAOctreeRenderer::build(Octree<LAYOUT_SOA>* d_octree) {
+  switch (buildOptions.type) {
+    case BuildOptions::BUILD_FROM_FILE:
+      buildFromFile(d_octree);
+      break;
+    case BuildOptions::BUILD_ON_DEVICE:
+      buildOnDevice(d_octree);
+      break;
+    default:
+      break;
   }
+}
 
-  CUDAOctreeRenderer::CUDAOctreeRenderer(const ConfigLoader & config)
-      : RTPSimpleRenderer(config) {}
+void CUDAOctreeRenderer::traceOnDevice(const int3* indices,
+                                       const float3* vertices) {
 
-  CUDAOctreeRenderer::CUDAOctreeRenderer(const ConfigLoader & config,
-                                         const BuildOptions & options)
-      : RTPSimpleRenderer(config), buildOptions(options) {}
+  const int numThreadsPerBlock = 256;
+  const int numBlocks =
+      (rayBuffer.count() + numThreadsPerBlock - 1) / numThreadsPerBlock;
 
-  void CUDAOctreeRenderer::render() {
-    int3* d_indices;
-    float3* d_vertices;
-    // int rounded_length = nextPow2(length);
+  Octree<LAYOUT_SOA>* d_octree = NULL;
+  CHK_CUDA(cudaMalloc((void**)(&d_octree), sizeof(Octree<LAYOUT_SOA>)));
+  build(d_octree);
 
-    CHK_CUDA(cudaMalloc((void**)&d_indices, scene.numTriangles * sizeof(int3)));
-    CHK_CUDA(
-        cudaMalloc((void**)&d_vertices, scene.numTriangles * sizeof(float3)));
-
-    CHK_CUDA(cudaMemcpy(d_indices, scene.indices,
-                        scene.numTriangles * sizeof(int3),
-                        cudaMemcpyHostToDevice));
-    CHK_CUDA(cudaMemcpy(d_vertices, scene.vertices,
-                        scene.numTriangles * sizeof(float3),
-                        cudaMemcpyHostToDevice));
-
-    traceOnDevice(d_indices, d_vertices);
-
-    cudaFree(d_indices);
-    cudaFree(d_vertices);
-  }
-
-  void CUDAOctreeRenderer::buildOnDevice(Octree<LAYOUT_SOA> * d_octree) {}
-
-  void CUDAOctreeRenderer::buildFromFile(Octree<LAYOUT_SOA> * d_octree) {
-    Octree<LAYOUT_AOS> octreeFileAos;
-    octreeFileAos.buildFromFile(buildOptions.info);
-    octreeFileAos.setGeometry(scene.vertices, scene.indices, scene.numTriangles,
-                              scene.numVertices);
-    Octree<LAYOUT_SOA> octreeFileSoa;
-    octreeFileSoa.copy(octreeFileAos);
-    octreeFileSoa.copyToGpu(d_octree);
-    Octree<LAYOUT_SOA> octreeFileSoaCheck;
-    octreeFileSoaCheck.copyFromGpu(d_octree);
-    LOG(DEBUG) << octreeFileSoaCheck << "\n";
-  }
-
-  void CUDAOctreeRenderer::build(Octree<LAYOUT_SOA> * d_octree) {
-    switch (buildOptions.type) {
-      case BuildOptions::BUILD_FROM_FILE:
-        buildFromFile(d_octree);
-        break;
-      case BuildOptions::BUILD_ON_DEVICE:
-        buildOnDevice(d_octree);
-        break;
-      default:
-        break;
-    }
-  }
-
-  void CUDAOctreeRenderer::traceOnDevice(const int3 * indices,
-                                         const float3 * vertices) {
-
-    const int numThreadsPerBlock = 256;
-    const int numBlocks =
-        (rayBuffer.count() + numThreadsPerBlock - 1) / numThreadsPerBlock;
-
-    Octree<LAYOUT_SOA>* d_octree = NULL;
-    CHK_CUDA(cudaMalloc((void**)(&d_octree), sizeof(Octree<LAYOUT_SOA>)));
-    build(d_octree);
-
-    traceKernel << <numBlocks, numThreadsPerBlock>>>
-        (rayBuffer.ptr(), indices, vertices, rayBuffer.count(), d_octree,
-         scene.numTriangles, hitBuffer.ptr());
-    Octree<LAYOUT_SOA>::freeOnGpu(d_octree);
-    CHK_CUDA(cudaFree((void*)(d_octree)));
-  }
+  traceKernel << <numBlocks, numThreadsPerBlock>>>
+      (rayBuffer.ptr(), indices, vertices, rayBuffer.count(), d_octree,
+       scene.numTriangles, hitBuffer.ptr());
+  Octree<LAYOUT_SOA>::freeOnGpu(d_octree);
+  CHK_CUDA(cudaFree((void*)(d_octree)));
+}
 
 }  // namespace oct
