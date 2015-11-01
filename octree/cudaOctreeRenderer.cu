@@ -43,10 +43,10 @@
 #define BIN_COUNT_Z (SAMPLE_COUNT_Z - 1)
 #define BIN_COUNT (BIN_COUNT_X * BIN_COUNT_Y * BIN_COUNT_Z)
 //
-#define BIN_GHOST_COUNT_X (BIN_COUNT_X + 1)
-#define BIN_GHOST_COUNT_Y (BIN_COUNT_Y + 1)
-#define BIN_GHOST_COUNT_Z (BIN_COUNT_Z + 1)
-#define BIN_GHOST_COUNT (BIN_GHOST_COUNT_X * BIN_GHOST_COUNT_Y * BIN_GHOST_COUNT_Z)
+// #define BIN_GHOST_COUNT_X (BIN_COUNT_X + 1)
+// #define BIN_GHOST_COUNT_Y (BIN_COUNT_Y + 1)
+// #define BIN_GHOST_COUNT_Z (BIN_COUNT_Z + 1)
+// #define BIN_GHOST_COUNT (BIN_GHOST_COUNT_X * BIN_GHOST_COUNT_Y * BIN_GHOST_COUNT_Z)
 
 // global memory allocation
 #define GLOBAL_WORK_POOL_SIZE 512
@@ -57,15 +57,16 @@
 #define BATCH_SIZE 32
 
 // local bin size
-#define BIN_SIZE (((CUDA_BLOCK_SIZE_X+1) * (CUDA_BLOCK_SIZE_Y+1) * (CUDA_BLOCK_SIZE_Z+1))<<3)
-#define REORDER_BIN_SIZE (CUDA_BLOCK_SIZE_X * CUDA_BLOCK_SIZE_Y * CUDA_BLOCK_SIZE_Z) 
+//#define BIN_SIZE (((CUDA_BLOCK_SIZE_X+1) * (CUDA_BLOCK_SIZE_Y+1) * (CUDA_BLOCK_SIZE_Z+1))<<3)
+#define BIN_SIZE (CUDA_BLOCK_SIZE << 3)
+#define REORDER_BIN_SIZE (CUDA_BLOCK_SIZE)
 
 // scan
-#define SCAN_BUFFER_SIZE (REORDER_BIN_SIZE << 1)
-#define SCAN_HEADER_SIZE (REORDER_BIN_SIZE)
+#define SCAN_BUFFER_SIZE (CUDA_BLOCK_SIZE << 1)
+#define SCAN_HEADER_SIZE (CUDA_BLOCK_SIZE)
 
 // cost values
-#define COST_SIZE (CUDA_BLOCK_SIZE_X * CUDA_BLOCK_SIZE_Y * CUDA_BLOCK_SIZE_Z)
+#define SAH_COST_SIZE (CUDA_BLOCK_SIZE)
 
 using namespace optix;
 
@@ -89,6 +90,8 @@ struct __device__ __host__ Work
   __device__ __host__ Work() : nodeId(-1) {}
   int nodeId;
   Aabb nodeBox;
+  int triOffset;
+  int numTriangles;
 };
 
 __device__ int inputPoolIdx = 0;
@@ -100,20 +103,32 @@ int getLinearThreadId()
   return ((blockDim.x * blockDim.y * threadIdx.z) + (blockDim.x * threadIdx.y) + threadIdx.x);
 }
 
-inline __device__
-int getLargeBinId(const octant, const int x, const int y, const z)
-{
-  return (BIN_GHOST_COUNT * octant) + (BIN_GHOST_COUNT_X * BIN_GHOST_COUNT_Y * z) + (BIN_GHOST_COUNT_X * y) + x;
-}
+// inline __device__
+// int getLargeBinId(const octant, const int x, const int y, const z)
+// {
+//   return (BIN_GHOST_COUNT * octant) + (BIN_GHOST_COUNT_X * BIN_GHOST_COUNT_Y * z) + (BIN_GHOST_COUNT_X * y) + x;
+// }
+
+// inline __device__
+// int getSmallBinId(const octant, const int x, const int y, const z)
+// {
+//   return (BIN_COUNT * octant) + (BIN_COUNT_X * BIN_COUNT_Y * z) + (BIN_COUNT_X * y) + x;
+// }
 
 inline __device__
-int getSmallBinId(const octant, const int x, const int y, const z)
+int getLocalBinId(const octant, const int x, const int y, const z)
 {
-  return (BIN_COUNT * octant) + (BIN_COUNT_X * BIN_COUNT_Y * z) + (BIN_COUNT_X * y) + x;
+  return (blockDim.x * octant) + (blockDim.x * blockDim.y * z) + (blockDim.x * y) + x;
 }
 
+// inline __device__
+// int getLinearSmallBinId(const int x, const int y, const z)
+// {
+//   return (BIN_COUNT_X * BIN_COUNT_Y * z) + (BIN_COUNT_X * y) + x;
+// }
+
 inline __device__
-int getLinearSmallBinId(const int x, const int y, const z)
+int getLinearBinId(const int x, const int y, const z)
 {
   return (BIN_COUNT_X * BIN_COUNT_Y * z) + (BIN_COUNT_X * y) + x;
 }
@@ -121,13 +136,13 @@ int getLinearSmallBinId(const int x, const int y, const z)
 inline __device__
 int getGlobalBinId(const int octant, const int x, const int y, const z, const int blockId=blockIdx.x)
 {
-  return (blockId * GLOBAL_BIN_SIZE_PER_BLOCK) + (octant * BIN_COUNT) + getLinearSmallBinId(x, y, z);
+  return (blockId * GLOBAL_BIN_SIZE_PER_BLOCK) + (octant * BIN_COUNT) + getLinearBinId(x, y, z);
 }
 
 inline __device__
 void populateBins(const int3* indices, const float3* vertices,
-                         const int numTriangles, const Work& work,
-                         Aabb* triBox, int* bin, int* globalBin)
+                  const int numTriangles, const Work& work,
+                  Aabb* triBox, int* bin, int* globalBin)
 {
   int numThreads = blockDim.x * blockDim.y * blockDim.z; 
 
@@ -296,9 +311,9 @@ void fetchBins(const int octant,
 {
   // source
   // -1 to account for ghost cells
-  sx = bchunkX * (blockDim.x-1) + threadIdx.x + xbit - 1;
-  sy = bchunkY * (blockDim.y-1) + threadIdx.y + ybit - 1;
-  sz = bchunkZ * (blockDim.z-1) + threadIdx.z + zbit - 1;
+  int sx = bchunkX * (blockDim.x-1) + threadIdx.x + xbit - 1;
+  int sy = bchunkY * (blockDim.y-1) + threadIdx.y + ybit - 1;
+  int sz = bchunkZ * (blockDim.z-1) + threadIdx.z + zbit - 1;
 
   // destination
   int dx = threadIdx.x;
@@ -306,11 +321,42 @@ void fetchBins(const int octant,
   int dz = threadIdx.z;
 
   // populate main and ghost cells 
-  bin[getLargeBinId(octant, dx, dy, dz)] = 0;
+  bin[getLocalBinId(octant, dx, dy, dz)] = 0;
 
   if (sx>=0 && sy>=0 && sz>=0 && (sx<BIN_COUNT_X) && (sy<BIN_COUNT_Y) && (sz<BIN_COUNT_Z))
   {
-    bin[getLargeBinId(octant, dx, dy, dz)] = globalBin[getGlobalBinId(octant, sx, sy, sz)];
+    bin[getLocalBinId(octant, dx, dy, dz)] = globalBin[getGlobalBinId(octant, sx, sy, sz)];
+  }
+}
+
+inline __device__
+void fetchBinsForSampling(const int3& sampleId, const int* globalBin, int* bin)
+{
+  for (int octant=0; octant<8; ++octant)
+  {
+    // bottom: sw(0), se(1), nw(2), ne(3)
+    // top   : sw(4), se(5), nw(6), ne(7)
+    int xbit = octant & 0x1;
+    int ybit = (octant >> 1) & 0x1;
+    int zbit = (octant >> 2) & 0x1;
+
+    // source
+    int sx = sampleId.x + xbit - 1;
+    int sy = sampleId.y + ybit - 1;
+    int sz = sampleId.z + zbit - 1;
+    
+    // destination
+    int dx = threadIdx.x;
+    int dy = threadIdx.y;
+    int dz = threadIdx.z;
+    
+    // populate main and ghost cells 
+    bin[getLocalBinId(octant, dx, dy, dz)] = 0;
+    
+    if (sx<0 || sy<0 || sz<0 || (sx>=SAMPLE_COUNT_X) || (sy>=SAMPLE_COUNT_Y) || (sz>=SAMPLE_COUNT_Z))
+      return; 
+    
+    bin[getLocalBinId(octant, dx, dy, dz)] = globalBin[getGlobalBinId(octant, sx, sy, sz)];
   }
 }
 
@@ -357,7 +403,7 @@ void addPartialSums(const int dim, const int octant,
     int dy = threadIdx.y + (dim==1)*(ybit*(blockDim.y-3)+1);
     int dz = threadIdx.z + (dim==2)*(zbit*(blockDim.z-3)+1);
 
-    bin[getLargeBinId(octant, dx, dy, dz)] += bin[getLargeBinId(octant, sx, sy, sz)]
+    bin[getLocalBinId(octant, dx, dy, dz)] += bin[getLocalBinId(octant, sx, sy, sz)]
   }
 }
 
@@ -366,7 +412,6 @@ void orientBins(const int dim, const int octant,
                 const int xbit, const int ybit, const int zbit,
                 const int* bin, int* reorderBin)
 {
-  // Note: bin is larger than reorderBin (due to bin's ghost cells).
   int x = threadIdx.x;
   int y = threadIdx.y;
   int z = threadIdx.z;
@@ -375,22 +420,22 @@ void orientBins(const int dim, const int octant,
   int sizeZ = blockDim.z-1;
  
   // source
-  int sx = x + (1-xbit);
-  int sy = y + (1-ybit);
-  int sz = z + (1-zbit);
+  // int sx = x + (1-xbit);
+  // int sy = y + (1-ybit);
+  // int sz = z + (1-zbit);
 
   // destination
   int dx = (dim==0)*(xbit*(sizeX-(x<<1))+x) + (dim==1)*(ybit*(sizeY-(y<<1))+y) + (dim==2)*(zbit*(sizeZ-(z<<1))+z);
   int dy = (dim==0||dim==2)*y + (dim==1)*x;
   int dz = (dim==0||dim==1)*z + (dim==2)*x;
 
-  reorderBin[getSmallBinId(octant, dx, dy, dz)] = bin[getLargeBinId(octant, sx, sy, sz)]
+  reorderBin[getLocalBinId(octant, dx, dy, dz)] = bin[getLocalBinId(octant, x, y, z)]
 }
 
 inline __device__
 void populateScanHeaders(int* scanHeader)
 {
-  scanHeader[getLinearSmallBinId(threadIdx.x, threadIdx.y, threadIdx.z)] = (threadIdx.x==0);
+  scanHeader[getLocalBinId(threadIdx.x, threadIdx.y, threadIdx.z)] = (threadIdx.x==0);
 }
 
 inline __device__
@@ -409,7 +454,7 @@ void evaluatePrefixSums(const int octant, const int xbit, const int ybit, const 
   int sizeY = blockDim.y-1;
   int sizeZ = blockDim.z-1;
 
-  int dataIn = din[getLinearSmallBinId(x, y, z)];
+  int dataIn = din[getLocalBinId(x, y, z)];
 
   int dataOut = segIncScanBlock(tid, dataIn, scratch, headFlag, size);
 
@@ -418,27 +463,43 @@ void evaluatePrefixSums(const int octant, const int xbit, const int ybit, const 
   int dy = (dim==0||dim==2)*y + (dim==1)*(ybit*(sizeX-(x<<1))+x);
   int dz = (dim==0||dim==1)*z + (dim==2)*(zbit*(sizeX-(x<<1))+x);
 
-  // note: dout is larger than din (due to ghost cells)
-  dx += (1-xbit);
-  dy += (1-ybit);
-  dz += (1-zbit);
+  // This is no longer the case.
+  // // note: dout is larger than din (due to ghost cells)
+  // dx += (1-xbit);
+  // dy += (1-ybit);
+  // dz += (1-zbit);
 
-  dout[getLargeBinId(octant, dx, dy, dz)] = dataOut;
+  dout[getLocalBinId(octant, dx, dy, dz)] = dataOut;
 }
 
 inline __device__
 void writeBackTriCounts(const int octant, const xbit, const ybit, const zbit,
+                        const int bchunkX, const int bchunkY, const int bchunkZ,
                         const int* bin, int* globalBin)
 {
-  // note: dout is larger than din (due to ghost cells)
-  int x = threadIdx.x + (1-xbit);
-  int y = threadIdx.y + (1-ybit);
-  int z = threadIdx.z + (1-zbit);
+  // This is no longer the case.
+  // // note: dout is larger than din (due to ghost cells)
+  // int sx = threadIdx.x + (1-xbit);
+  // int sy = threadIdx.y + (1-ybit);
+  // int sz = threadIdx.z + (1-zbit);
 
-  int src = getLargeBinId(octant, x, y, z);
-  int dest = getGlobalBinId(octant, threadIdx.x, threadIdx.y, threadIdx.z);
+  int x = threadIdx.x;
+  int y = threadIdx.y;
+  int z = threadIdx.z;
 
-  globalBin[dest] = bin[src];
+  if (x==0 || y==0 || z==0) {
+    return
+  }
+
+  int sx = x + (1-(xbit<<1));
+  int sy = y + (1-(ybit<<1));
+  int sz = z + (1-(zbit<<1));
+
+  int dx = blockDim.x * bchunkX + sx;
+  int dy = blockDim.y * bchunkY + sy;
+  int dz = blockDim.z * bchunkZ + sz;
+
+  globalBin[getGlobalBinId(octant, dx, dy, dz)] = bin[getLocalBinId(octant, sx, sy, sz)];
 }
 
 // The following accumulateBins function divides the BIN size by Nx/Ny/Nz threads, not Nx-1/Ny-1/Nz-1
@@ -543,19 +604,20 @@ void accumulateBins(int* bin, int* reorderBin, int* globalBin, int* scanBuffer, 
 
           for (int dim=0; dim<3; ++dim)
           {
-            // 2. add partial sums
-            addPartialSums(dim, octant, xbit, ybit, zbit, bin);
-            __syncthreads();
+            // We don't need this step because we are using inclusive scan.
+            // // 2. add partial sums
+            // addPartialSums(dim, octant, xbit, ybit, zbit, bin);
+            // __syncthreads();
 
-            // 3. reorder counter values
+            // 2. reorder counter values
             orientBins(dim, octant, xbit, ybit, zbit, bin, reorderBin);
             __syncthreads();
 
-            // 4. populate heads
+            // 3. populate heads
             populateScanHeaders(scanHeader);
             __syncthreads();
 
-            // 5. evaluate prefix sums
+            // 4. evaluate prefix sums
             evaluatePrefixSums(octant, xbit, ybit, zbit,
                                reorderBin, scanHeader, scanBuffer, bin);
             __syncthreads();
@@ -566,7 +628,8 @@ void accumulateBins(int* bin, int* reorderBin, int* globalBin, int* scanBuffer, 
           // TODO: better to write back for all octants at once?
           // for now, let's do it on a octant basis.
           //
-          writeBackTriCounts(octant, xbit, ybit, zbit, bin, globalBin);
+          writeBackTriCounts(octant, xbit, ybit, zbit,
+                             bchunkX, bchunkY, bchunkZ, bin, globalBin);
           __syncthreads();
         }
       }
@@ -574,91 +637,148 @@ void accumulateBins(int* bin, int* reorderBin, int* globalBin, int* scanBuffer, 
   }
 }
 
-// TODO: this function is incomplete.
-inline __device__
-void evaluateCosts(const int bchunkX, const int bchunkY, const int bchunkZ,
-                   const int* bin, float* cost, const Aabb& nodeBox)
+__device__
+void octantBounds(const int octant, const Aabb& node, const float3& point, Aabb& bounds);
 {
-  // evaluate SAH cost
-  float sum = 0;
+  // bottom: sw(0), se(1), nw(2), ne(3)
+  // top   : sw(4), se(5), nw(6), ne(7)
+  int xbit = octant & 0x1;
+  int ybit = (octant >> 1) & 0x1;
+  int zbit = (octant >> 2) & 0x1;
 
-  for (int octant=0; octant<8; ++octant)
-  {
-    int xbit = octant & 0x1;
-    int ybit = (octant >> 1) & 0x1;
-    int zbit = (octant >> 2) & 0x1;
+  float xmin = (xbit==0)*node[0].x + (xbit==1)*point.x;
+  float ymin = (ybit==0)*node[0].y + (ybit==1)*point.y;
+  float zmin = (zbit==0)*node[0].z + (zbit==1)*point.z;
 
-    int x = threadIdx.x + xbit;
-    int y = threadIdx.y + ybit;
-    int z = threadIdx.z + zbit;
+  float xmax = (xbit==1)*node[1].x + (xbit==0)*point.x;
+  float ymax = (ybit==1)*node[1].y + (ybit==0)*point.y;
+  float zmax = (zbit==1)*node[1].z + (zbit==0)*point.z;
 
-    int count = bin[getLargeBinId(octant, x, y, z)];
+  float3 pmin = make_float3(xmin, ymin, zmin); 
+  float3 pmax = make_float3(xmax, ymax, zmax); 
 
-    float3 diag = nodeBox[1] - nodeBox[0];
-    float3 step = make_float3(diag.x/BIN_COUNT_X, diag.y/BIN_COUNT_Y, diag.z/BIN_COUNT_Z);
-
-    int px = blockDim.x * bchunkX + threadIdx.x + 1; 
-    int py = blockDim.y * bchunkY + threadIdx.y + 1;
-    int pz = blockDim.z * bchunkZ + threadIdx.z + 1;
-
-    //float3 pmin =  nodeBox[0];
-    //float3 pmax =  nodeBox[0] + make_float3(px*step.x, py*step.y, pz*step.z)
-
-    float3 pmin = ;
-    float3 pmax = ;
- 
-    Aabb box;
-    box.set(pmin, pmax);
-    float area = box.area();
-
-    sum += (area * count);
-  }
-
-  // C = kt + (ki * Sum_i(Ai * Ni)) / A
-  float sahCost = KT + (KI * sum / nodeBox.area());
-
-  cost[] = sahCost;
-
-  __syncthreads();
-
-  // sample the point with minimum cost
+  bounds.set(pmin, pmax);
 }
 
 inline __device__
-void sampleSplitPoint(const int* globalBin, int* bin, float* cost)
+void evaluateSAHCosts(const int3& sampleId, const int* bin, const Aabb& nodeBox, float* cost)
+{
+  float sum = 0;
+  float3 diag = nodeBox[1] - nodeBox[0];
+  float3 step = make_float3(diag.x/BIN_COUNT_X, diag.y/BIN_COUNT_Y, diag.z/BIN_COUNT_Z);
+
+  for (int octant=0; octant<8; ++octant)
+  {
+    // int x = threadIdx.x + xbit;
+    // int y = threadIdx.y + ybit;
+    // int z = threadIdx.z + zbit;
+
+    int tcount = bin[getLocalBinId(octant, threadIdx.x, threadIdx.y, threadIdx.z)];
+
+    float3 sample = nodeBox + make_float3(sampleId.x * step.x,
+                                          sampleId.y * step.y,
+                                          sampleId.z * step.z);
+    Aabb box;
+    octantBounds(octant, nodeBox, sample, box);
+    float area = box.area();
+
+    sum += (area * tcount);
+  }
+
+  // C = kt + (ki * Sum_i(Ai * Ni)) / A
+  cost[getLinearThreadId()] = KT + (KI * sum / nodeBox.area());;
+}
+
+inline __device__
+void updateMinCost(const int tid, const int minTid, const float cost, const int index,
+                   float* minCost, int* minIndex)
+{
+  if (tid!=minTid)
+    return;
+
+  if (cost<minCost)
+  {
+    *minCost = cost;
+    *minIndex = index;
+  }
+}
+
+inline __device__
+void sampleSplitPoint(const Work& work, const int* globalBin, int* bin, float* cost, int* index,
+                      float* minCost, int* minIndex)
 {
   int numThreads = blockDim.x * blockDim.y * blockDim.z;
+  int tid = getLinearThreadId();
 
-  int binsPerThreadX = (BIN_COUNT_X + blockDim.x - 1) / (blockDim.x-1);
-  int binsPerThreadY = (BIN_COUNT_Y + blockDim.y - 1) / (blockDim.y-1);
-  int binsPerThreadZ = (BIN_COUNT_Z + blockDim.z - 1) / (blockDim.z-1);
+  bool minThreadId = (threadIdx.x==0 && threadIdx.y==0 && threadIdx.z==0);
+  if (minThreadId)
+  {
+    *minCost = NPP_MAXABS_32F; 
+    *minIndex = 0;
+  }
+  __syncthreads();
 
-  for (int bchunkZ=0; bchunkZ<binsPerThreadZ; ++bchunkZ) {
-    for (int bchunkY=0; bchunkY<binsPerThreadY; ++bchunkY) {
-      for (int bchunkX=0; bchunkX<binsPerThreadX; ++bchunkX) {
+  int samplesPerThreadX = (SAMPLE_COUNT_X + blockDim.x - 1) / blockDim.x;
+  int samplesPerThreadY = (SAMPLE_COUNT_Y + blockDim.y - 1) / blockDim.y;
+  int samplesPerThreadZ = (SAMPLE_COUNT_Z + blockDim.z - 1) / blockDim.z;
 
-        for (int octant=0; octant<8; ++octant) {
+  for (int schunkZ=0; schunkZ<samplesPerThreadZ; ++schunkZ) {
+    for (int schunkY=0; schunkY<samplesPerThreadY; ++schunkY) {
+      for (int schunkX=0; schunkX<samplesPerThreadX; ++schunkX) {
 
-          // bottom: sw(0), se(1), nw(2), ne(3)
-          // top   : sw(4), se(5), nw(6), ne(7)
-          int xbit = octant & 0x1;
-          int ybit = (octant >> 1) & 0x1;
-          int zbit = (octant >> 2) & 0x1;
+        int3 sampleId = make_int3(schunkX * blockDim.x + threadIdx.x,
+                                  schunkX * blockDim.y + threadIdx.y,
+                                  schunkX * blockDim.z + threadIdx.z);
 
-          // 1. fetch prefix sums from global memory
-          fetchBins(octant, xbit, ybit, zbit,
-                    bchunkX, bchunkY, bchunkZ,
-                    binsPerThreadX, binsPerThreadY, binsPerThreadZ,
-                    globalBin, bin);
-          __syncthreads();
-        }
+        // 1. fetch prefix sums from global memory for sampling
+        fetchBinsForSampling(sampleId, globalBin, bin);
+        __syncthreads();
          
         // 2. evaluate the cost function
-        evaluateCosts(bin, cost);
+        evaluateSAHCosts(sampleId, bin, work.nodeBox, cost);
+        __syncthreads();
+
+        // 3. evaluate the minimum cost value
+        minReduceBlock(tid, numThreads, cost, index);
+        __syncthreads();
+
+        // 4. save min cost and index
+        updateMinCost(tid, minThreadId, cost[0], index[0], minCost, minIndex);
         __syncthreads();
       }
     }
   }
+}
+
+// the following code is incomplete
+inline __device__
+void createChildNodes(Work& work, const int minIndex, Work* newWork)
+{
+  // // split the node
+  // Bounds *bounds = 
+  // tid = getLinearThreadId();
+
+  // Aabb bounds[8];
+
+  // for (int octant=0; octant<8; ++octant)
+  // {
+  //   work.nodeBox
+  //   float3 point = fcn(minIndex);
+
+  //   octantBounds(octant, work.nodeBox, point, bounds[octant])
+  // }
+
+  // int numThreads = blockDim.x * blockDim.y * blockDim.z; 
+  // int trianglesPerThread = (work.numTriangles + numThreads - 1) / numThreads;
+
+  // for (int tri=0; tri<numTriangles; ++tri)
+  // {
+  //   // intesection tests
+  //   if (intersect())
+  //   {
+  //     = tri;
+  //   }
+  // }
 }
 
 __device__
@@ -666,11 +786,21 @@ void buildOctree(const int3* indices, const float3* vertices,
                  const int numTriangles, const Work& work,
                  Work* outputPool,
                  Aabb* triBox, int* bin, int* reorderBin, int* globalBin,
-                 int* scanBuffer, int* scanHeader)
+                 int* scanBuffer, int* scanHeader, float* sahCost,
+                 float* minCost, int* minIndex)
 {
   populateBins(indices, vertices, numTriangles, work, triBox, bin, globalBin);
+  __syncthreads(); //TODO: necessary?
+
   accumulateBins(bin, reorderBin, globalBin, scanBuffer, scanHeader);
-  sampleSplitPoint(globalBin, bin);
+  __syncthreads(); //TODO: necessary?
+
+  // note: reorderBin is also used to maintain thread indices
+  sampleSplitPoint(work, globalBin, bin, sahCost, reorderBin, minCost, minIndex);
+  __syncthreads(); //TODO: necessary?
+
+  createChildNodes(minCost, minIndex);
+  __syncthreads(); //TODO: necessary?
 }
 
 __global__
@@ -690,21 +820,28 @@ void worker(const int3* indices, const float3* vertices,
   __shared__ int reorderBin[REORDER_BIN_SIZE];
   __shared__ int scanBuffer[SCAN_BUFFER_SIZE];
   __shared__ int scanHeader[SCAN_HEADER_SIZE];
-  __shared__ float cost[COST_SIZE];
+  __shared__ float sahCost[SAH_COST_SIZE];
+
+  // TODO: should we just use registers for minCost and minIndex?
+  __shared__ float minCost;
+  __shared__ int minIndex;
 
   bool fetcherThread = (threadIdx.x==0 && threadIdx.y==0 && threadIdx.z==0);
   int tid = getLinearThreadId();
 
-  if (fetcherThread) {
+  if (fetcherThread)
+  {
     localPoolSize = 0;
   }
   __syncthreads();
 
-  while(true) {
+  while(true)
+  {
     // fetch work if local pool is empty
-    if (localPoolSize == 0) {
-
-      if (fetcherThread) {
+    if (localPoolSize == 0)
+    {
+      if (fetcherThread)
+      {
         baseIdx = atomicAdd(&inputPoolIdx, BATCH_SIZE);
         localPoolIdx = 0;
         localPoolSize = BATCH_SIZE;
@@ -716,12 +853,14 @@ void worker(const int3* indices, const float3* vertices,
         return  
 
       // fetch work from the work pool in global memory
-      if (tid < BATCH_SIZE) {
+      if (tid < BATCH_SIZE)
+      {
         localPool[tid] = Work();
         int index = baseIdx + tid;
 
         // fetch work if within the range
-        if (index < inputPoolSize) {
+        if (index < inputPoolSize)
+        {
           localPool[tid] = inputPool[index];
         }
       }
@@ -729,13 +868,16 @@ void worker(const int3* indices, const float3* vertices,
     __syncthreads();
 
     // work is valid if nodeID is non-negative
-    if (localPool[localPoolIdx].nodeId >= 0) {
+    if (localPool[localPoolIdx].nodeId >= 0)
+    {
       buildOctree(indices, vertices, numTriangles, localPool[localPoolIdx], outputPool,
-                  triBox, bin, reorderBin, globalBin, scanBuffer, scanHeader);
+                  triBox, bin, reorderBin, globalBin, scanBuffer, scanHeader, sahCost,
+                  minCost, minIndex);
     }
 
     // next work to process
-    if (fetcherThread) {
+    if (fetcherThread)
+    {
       ++localPoolIdx;
       --localPoolSize;
     }
@@ -868,13 +1010,32 @@ void CUDAOctreeRenderer::build(const int3* indices, const float3* vertices,
   dim3 blockDim(CUDA_BLOCK_SIZE_X, CUDA_BLOCK_SIZE_Y, CUDA_BLOCK_SIZE_Z);
 
   bool done = false;
+
   int inputPoolSize = 1;
-  while(!done) {  
-    Work* inputPool = d_workPoolA;
-    Work* outputPool = d_workPoolB;
+
+  bool isPoolAInput = true;
+  Work* inputPool = d_workPoolA;
+  Work* outputPool = d_workPoolB;
+
+  while(!done)
+  { 
     worker<<<gridDim, blockDim>>>(indices, vertices, scene.numTriangles, inputPoolSize, inputPool, outputPool, d_bin);
     cudaDeviceSynchronize();
+
     // workPoolSizeEval<<<gridDim, blockDim>>>(indices, vertices, scene.numTriangles);
+    
+    if (isPoolAInput)
+    {
+      inputPool = d_workPoolB;
+      outputPool = d_workPoolA;
+      isPoolAInput = false;
+    }
+    else
+    {
+      inputPool = d_workPoolA;
+      outputPool = d_workPoolB;
+      isPoolAInput = true;
+    }
   }
 }
 
