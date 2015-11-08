@@ -141,7 +141,7 @@ int main( int argc, char** argv )
   } else if (rtype == GPU_CUDA_SIMPLE) {
     renderer = new CUDASimpleRenderer(config);
   } else if (rtype == GPU_CUDA_OCTREE) {
-    renderer = new CUDAOctreeRenderer(config);
+    renderer = new oct::CUDAOctreeRenderer(config);
   } else {
     renderer = new RTPSimpleRenderer(config);
   }

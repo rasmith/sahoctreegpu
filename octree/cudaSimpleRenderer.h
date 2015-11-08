@@ -5,7 +5,8 @@
 #include "rtpSimpleRenderer.h"
 #include "configLoader.h"
 
-class CUDASimpleRenderer : public RTPSimpleRenderer {
+class CUDASimpleRenderer : public RTPSimpleRenderer
+{
 public:
   CUDASimpleRenderer(const ConfigLoader& config);
   virtual ~CUDASimpleRenderer() {}

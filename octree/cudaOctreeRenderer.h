@@ -5,9 +5,13 @@
 #include "rtpSimpleRenderer.h"
 #include "configLoader.h"
 
-struct Work;
+namespace oct
+{
 
-class CUDAOctreeRenderer : public RTPSimpleRenderer {
+struct Node;
+
+class CUDAOctreeRenderer : public RTPSimpleRenderer
+{
 public:
   CUDAOctreeRenderer(const ConfigLoader& config);
   virtual ~CUDAOctreeRenderer() {}
@@ -15,8 +19,12 @@ public:
 private:
   //void simpleTraceOnDevice(const int3* indices, const float3* vertices);
   void build(const int3* indices, const float3* vertices,
-             Work* d_workPoolA, Work* d_workPoolB, int* d_bin);
+             int* d_numInputNodes, int* d_numOutputNodes,
+             int* d_inPoolIndex, int* d_outPoolIndex,
+             Node* d_tree, int* d_triList, int* d_bin);
   void trace(const int3* indices, const float3* vertices);
 };
+
+}
 
 #endif

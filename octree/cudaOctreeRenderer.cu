@@ -1,11 +1,12 @@
 #include "cudaOctreeRenderer.h"
+
+// TODO: How do I separate .h and .cu? Including header files here does not work.
+#include "octreeScan.cu"
+#include "octreeReduce.cu"
+
 #include <nppdefs.h>
 #include <optixu_aabb.h>
 #include <optix_math.h>
-#include "octreeScan.h"
-#include "octreeReduce.h"
-
-#define kEpsilon 1e-18
 
 // TODO: best values?
 #define KT 0.1
@@ -18,7 +19,6 @@
 // warp size (assume that WARP_SIZE is power of two)
 #define WARP_SIZE 32
 #define LOG_WARP_SIZE 5
-
 
 // TODO: set these numbers to right values
 #define CUDA_GRID_SIZE_X 15
@@ -42,15 +42,15 @@
 #define BIN_COUNT_Y (SAMPLE_COUNT_Y - 1)
 #define BIN_COUNT_Z (SAMPLE_COUNT_Z - 1)
 #define BIN_COUNT (BIN_COUNT_X * BIN_COUNT_Y * BIN_COUNT_Z)
-//
-// #define BIN_GHOST_COUNT_X (BIN_COUNT_X + 1)
-// #define BIN_GHOST_COUNT_Y (BIN_COUNT_Y + 1)
-// #define BIN_GHOST_COUNT_Z (BIN_COUNT_Z + 1)
-// #define BIN_GHOST_COUNT (BIN_GHOST_COUNT_X * BIN_GHOST_COUNT_Y * BIN_GHOST_COUNT_Z)
+
+// tree configuration
+#define MAX_NUM_NODES (1<<24) // TODO
+#define MAX_TREE_DEPTH 10
 
 // global memory allocation
-#define MAX_NUM_NODES (2<<29) // TODO
-#define TRIANGLE_LIST_SIZE (2<<29) // TODO
+#define HALF_TRI_LIST_SIZE (1<<24) // TODO
+#define TRI_LIST_SIZE (HALF_TRI_LIST_SIZE << 1)
+
 #define GLOBAL_BIN_SIZE_PER_BLOCK (BIN_COUNT << 3)
 #define GLOBAL_BIN_SIZE (CUDA_GRID_SIZE * GLOBAL_BIN_SIZE_PER_BLOCK)
 
@@ -58,7 +58,6 @@
 #define BATCH_SIZE 32
 
 // local bin size
-//#define BIN_SIZE (((CUDA_BLOCK_SIZE_X+1) * (CUDA_BLOCK_SIZE_Y+1) * (CUDA_BLOCK_SIZE_Z+1))<<3)
 #define BIN_SIZE (CUDA_BLOCK_SIZE << 3)
 #define REORDER_BIN_SIZE (CUDA_BLOCK_SIZE)
 
@@ -69,33 +68,36 @@
 // cost values
 #define SAH_COST_SIZE (CUDA_BLOCK_SIZE)
 
-#define TRI_LIST_OFFSET (CUDA_BLOCK_SIZE<<3)
-#define TRI_HIT_SIZE (CUDA_BLOCK_SIZE<<3)
-
 using namespace optix;
-
-// struct WorkPool {
-//   WorkPool() : workCount(0), nextWorkIdx(0) {}
-//   int workCount;
-//   int nextWorkIdx;
-// }
-
-// struct BBox {
-//   float3 min;
-//   float3 max;
-// }
 
 namespace oct
 {
 
-struct __device__ __host__ Node
+// TODO: use SOA instead?
+struct Node
 {
-  inline bool isRoot() { return (id == 0); }
-  int id;           // node id
-  int level;        // tree level
+  __device__ __host__
+  Node() : id(-1) {
+    for (int i=0; i<8; ++i)
+      child[i] = -1;
+  }
+  inline __device__ __host__ 
+  void updateAllButChild(int id, int level, int octant, const Aabb& bounds,
+                         bool isLeaf, int numTriangles, bool firstHalf)
+  {
+    this->id = id;
+    this->level = level;
+    this->octant = octant;
+    this->bounds = bounds;
+    this->isLeaf = isLeaf;
+    this->numTriangles = numTriangles;
+    this->firstHalf = firstHalf;
+  }
+  int id;           // index into the tree
+  int level;        // tree level (root: level0)
+  int octant;       // octant id (0 to 7)
   Aabb bounds;      // node bounds 
   bool isLeaf;      // indicates this is a leaf node
-  int triListBase;  // base index into the list of triangle IDs
   int numTriangles; // # triangles bounded by this node
   int child[8];     // index into the tree
   bool firstHalf;   // indicates first half of allocated triangleList space
@@ -107,29 +109,23 @@ int getLinearThreadId()
   return ((blockDim.x * blockDim.y * threadIdx.z) + (blockDim.x * threadIdx.y) + threadIdx.x);
 }
 
-// inline __device__
-// int getLargeBinId(const octant, const int x, const int y, const z)
-// {
-//   return (BIN_GHOST_COUNT * octant) + (BIN_GHOST_COUNT_X * BIN_GHOST_COUNT_Y * z) + (BIN_GHOST_COUNT_X * y) + x;
-// }
-
-// inline __device__
-// int getSmallBinId(const octant, const int x, const int y, const z)
-// {
-//   return (BIN_COUNT * octant) + (BIN_COUNT_X * BIN_COUNT_Y * z) + (BIN_COUNT_X * y) + x;
-// }
+inline __device__
+int getNumThreads()
+{
+  return (blockDim.x * blockDim.y * blockDim.z);
+}
 
 inline __device__
 int getLocalBinId(int octant, int x, int y, int z)
 {
-  return (blockDim.x * octant) + (blockDim.x * blockDim.y * z) + (blockDim.x * y) + x;
+  return (getNumThreads() * octant) + (blockDim.x * blockDim.y * z) + (blockDim.x * y) + x;
 }
 
-// inline __device__
-// int getLinearSmallBinId(const int x, const int y, const z)
-// {
-//   return (BIN_COUNT_X * BIN_COUNT_Y * z) + (BIN_COUNT_X * y) + x;
-// }
+inline __device__
+int getLocalBinId(int x, int y, int z)
+{
+  return (blockDim.x * blockDim.y * z) + (blockDim.x * y) + x;
+}
 
 inline __device__
 int getLinearBinId(int x, int y, int z)
@@ -144,24 +140,49 @@ int getGlobalBinId(int octant, int x, int y, int z, int blockId=blockIdx.x)
 }
 
 inline __device__
-float3 getPointFromBounds(const Aabb& bounds, int i, int j, int k)
+Aabb getBinBounds(const Node& node, int i, int j, int k)
 {
+  const Aabb& bounds = node.bounds;
+  Aabb binBounds;
   float3 diag = bounds[1] - bounds[0];
   float3 step = make_float3(diag.x/BIN_COUNT_X, diag.y/BIN_COUNT_Y, diag.z/BIN_COUNT_Z);
-  float3 point = bounds[0] + make_float3(i*step.x, j*step.y, k*step.z);
+  float3 min = bounds[0] + make_float3(i*step.x, j*step.y, k*step.z);
+  binBounds.set(min, min+step);
+  return binBounds;
+}
+
+inline __device__
+float3 getSampleFromBounds(const Node& node, int i, int j, int k)
+{
+  float3 diag = node.bounds[1] - node.bounds[0];
+  float3 step = make_float3(diag.x/(SAMPLE_COUNT_X-1), diag.y/(SAMPLE_COUNT_Y-1), diag.z/(SAMPLE_COUNT_Z-1));
+  float3 point = node.bounds[0] + make_float3(i*step.x, j*step.y, k*step.z);
   return point;
 }
 
-//TODO: incomplete function
-inline __device__
-void checkTermination();
+__device__
+int getGlobalTriListBase(int treeLevel, int octant, bool firstHalf)
 {
-  return;
+  int partitionSize = HALF_TRI_LIST_SIZE >> (3 * treeLevel);
+  int base = (firstHalf==false) * HALF_TRI_LIST_SIZE + partitionSize * octant;
+  return base;
 }
 
 inline __device__
-void populateBins(const int3* triList, const int3* indices, const float3* vertices,
-                  const Node& node,
+bool isCornerSample(int x, int y, int z)
+{
+   bool corner = ((x==0 && y==0) ||
+                  (x==SAMPLE_COUNT_X-1 && y==0) ||
+                  (x==0 && y==SAMPLE_COUNT_Y-1) ||
+                  (x==SAMPLE_COUNT_X-1 && y==SAMPLE_COUNT_Y-1));
+   bool bottomCorner = ((z==0) && corner);
+   bool topCorner = ((z==SAMPLE_COUNT_Z-1) && corner);
+   return (bottomCorner || topCorner);
+}
+
+inline __device__
+void populateBins(const int3* indices, const float3* vertices,
+                  const Node& node, const int* globalTriList,
                   Aabb* triBox, int* bin, int* globalBin)
 {
   int numThreads = blockDim.x * blockDim.y * blockDim.z; 
@@ -183,51 +204,47 @@ void populateBins(const int3* triList, const int3* indices, const float3* vertic
         int binY = blockDim.y * bchunkY + threadIdx.y;
         int binZ = blockDim.z * bchunkZ + threadIdx.z;
         
-        if ((binX<BIN_COUNT_X) && (binY<BIN_COUNT_Y) && (binZ<BIN_COUNT_Z)) {
-
+        if ((binX<BIN_COUNT_X) && (binY<BIN_COUNT_Y) && (binZ<BIN_COUNT_Z))
+        {
           // initialize all bin values to 0 (shared mem)
-          for (int octant=0; octant<8; ++octant) {
+          for (int octant=0; octant<8; ++octant)
+          {
             bin[numThreads * octant + tid] = 0;
           }
 
-          // select the node to split
-          const Aabb& bounds = node.bounds;
+          // bin bounds
+          Aabb binBox = getBinBounds(node, binX, binY, binZ);
           
-          // evaluate bin bounds (binBox)
-          float3 min = getPointFromBounds(bounds, binX, binY, binZ);
-          
-          Aabb binBox;
-          binBox.set(min, min+step);
-          
-          int outOfBound = 1 - bounds.intersects(binBox);
-
           for (int tchunk=0; tchunk<trianglesPerThread; ++tchunk)
           {
             // fetch a triangle and compute its bounding box
             triBox[tid].invalidate();
-            int offset = numThreads * tchunk + tid;
+            int toffset = numThreads * tchunk + tid;
           
-            if (offset < node.numTriangles)
+            if (toffset < node.numTriangles)
             {
-              triId = offset;
-              if (!node.isRoot())
-                triId = globalTriList[node.triListBase + offset];
+              int base = getGlobalTriListBase(node.level, node.octant, node.firstHalf);
+              int triId = globalTriList[base + toffset];
 
               const int3 vindex = indices[triId];
               triBox[tid].set(vertices[vindex.x], vertices[vindex.y], vertices[vindex.z]);
             }
             __syncthreads();
 
+            // will it be faster to parallelize over traingles?
+            // i.e. each thread processes a triangle and iterate over multiple bins.
+            // Answer: No! many threads can map to the same bin (i.e. a conflicts).
+            //
             // for all triangles in shared mem
             for (int t=0; t<numThreads; ++t)
             {
               Aabb& tbox = triBox[t];
           
               // evaluate the triangle count only if the triangle box falls within the node bounds
-              if (tbox.valid() && bounds.intersects(tbox))
+              if (tbox.valid() && node.bounds.intersects(tbox))
               {
                 // clip the triangle box (i.e. discard the portion outside the node)
-                Aabb clippedTbox(fmaxf(bounds[0], tbox[0]), fminf(bounds[1], tbox[1]));
+                Aabb clippedTbox(fmaxf(node.bounds[0], tbox[0]), fminf(node.bounds[1], tbox[1]));
           
                 // finally populate triangle counts for all octants
                 for (int octant=0; octant<8; ++octant)
@@ -263,60 +280,6 @@ void populateBins(const int3* triList, const int3* indices, const float3* vertic
   }
   // done populating all global bins
 }
-
-// The following assumes that the BIN size is divided by Nx/Ny/Nz threads, not Nx-1/Ny-1/Nz-1.
-#if 0
-inline __device__
-void fetchBins(int octant,
-               int xbit,
-               int ybit,
-               int zbit,
-               int bchunkX,
-               int bchunkY,
-               int bchunkZ,
-               int binsPerThreadX,
-               int binsPerThreadY,
-               int binsPerThreadZ,
-               const int* globalBin,
-               int* bin)
-{
-  int dx = threadIdx.x;
-  int dy = threadIdx.y;
-  int dz = threadIdx.z;
-
-  // TODO: check if the following makes sense.
-  int sx = blockDim.x * (xbit * (binsPerThreadX - bchunkX)) + ((1-xbit) * bchunkX) + threadIdx.x + (xbit-1);
-  int sy = blockDim.y * (ybit * (binsPerThreadY - bchunkY)) + ((1-ybit) * bchunkY) + threadIdx.y + (ybit-1);
-  int sz = blockDim.z * (zbit * (binsPerThreadZ - bchunkZ)) + ((1-zbit) * bchunkZ) + threadIdx.z + (zbit-1);
-
-  bin[getLargeBinId(octant, dx, dy, dz)] = 0;
-
-  // populate main cells
-  if (sx>=0 && sy>=0 && sz>=0 && (sx<BIN_COUNT_X) && (sy<BIN_COUNT_Y) && (sz<BIN_COUNT_Z))
-  {
-    bin[getLargeBinId(octant, dx, dy, dz)] = globalBin[getGlobalBinId(octant, sx, sy, sz)];
-  }
-
-  // populate ghost cells
-  if (threadIdx.x==0 || threadIdx.y==0 || threadIdx.z==0)
-  {
-    sx += ((dx==0) * blockDim.x);
-    sy += ((dy==0) * blockDim.y);
-    sz += ((dz==0) * blockDim.z);
-
-    dx += ((dx==0) * blockDim.x);
-    dy += ((dy==0) * blockDim.y);
-    dz += ((dz==0) * blockDim.z);
-
-    bin[getLargeBinId(octant, dx, dy, dz)] = 0;
-
-    if (sx>=0 && sy>=0 && sz>=0 && (sx<BIN_COUNT_X) && (sy<BIN_COUNT_Y) && (sz<BIN_COUNT_Z))
-    {
-      bin[getLargeBinId(octant, dx, dy, dz)] = globalBin[getGlobalBinId(octant, sx, sy, sz)];
-    }
-  }
-}
-#endif
 
 inline __device__
 void fetchBins(int octant,
@@ -408,6 +371,7 @@ void addPartialSums(int dim, int octant,
 }
 #endif
 
+inline __device__
 void addPartialSums(int dim, int octant,
                     int xbit, int ybit, int zbit,
                     int* bin)
@@ -426,7 +390,7 @@ void addPartialSums(int dim, int octant,
     int dy = threadIdx.y + (dim==1)*(ybit*(blockDim.y-3)+1);
     int dz = threadIdx.z + (dim==2)*(zbit*(blockDim.z-3)+1);
 
-    bin[getLocalBinId(octant, dx, dy, dz)] += bin[getLocalBinId(octant, sx, sy, sz)]
+    bin[getLocalBinId(octant, dx, dy, dz)] += bin[getLocalBinId(octant, sx, sy, sz)];
   }
 }
 
@@ -452,7 +416,7 @@ void orientBins(int dim, int octant,
   int dy = (dim==0||dim==2)*y + (dim==1)*x;
   int dz = (dim==0||dim==1)*z + (dim==2)*x;
 
-  reorderBin[getLocalBinId(octant, dx, dy, dz)] = bin[getLocalBinId(octant, x, y, z)]
+  reorderBin[getLocalBinId(octant, dx, dy, dz)] = bin[getLocalBinId(octant, x, y, z)];
 }
 
 inline __device__
@@ -462,7 +426,7 @@ void populateScanHeaders(int* scanHeader)
 }
 
 inline __device__
-void evaluatePrefixSums(int octant, int xbit, int ybit, int zbit,
+void evaluatePrefixSums(int dim, int octant, int xbit, int ybit, int zbit,
                         const int* din, int* headFlag, int* scratch, int* dout)
 {
   int tid = getLinearThreadId();
@@ -474,13 +438,14 @@ void evaluatePrefixSums(int octant, int xbit, int ybit, int zbit,
   int z = threadIdx.z;
 
   int sizeX = blockDim.x-1;
-  int sizeY = blockDim.y-1;
-  int sizeZ = blockDim.z-1;
+  // int sizeY = blockDim.y-1; // TODO: this is never used.
+  // int sizeZ = blockDim.z-1; // TODO: this is never used.
 
   int dataIn = din[getLocalBinId(x, y, z)];
 
   int dataOut = segIncScanBlock(tid, dataIn, scratch, headFlag, size);
 
+  // TODO: check if dy and dz are correct (especially sizeX)
   // destination (inverse the orientations)
   int dx = (dim==0)*(xbit*(sizeX-(x<<1))+x) + (dim==1)*y + (dim==2)*z; 
   int dy = (dim==0||dim==2)*y + (dim==1)*(ybit*(sizeX-(x<<1))+x);
@@ -510,9 +475,8 @@ void writeBackTriCounts(int octant, int xbit, int ybit, int zbit,
   int y = threadIdx.y;
   int z = threadIdx.z;
 
-  if (x==0 || y==0 || z==0) {
-    return
-  }
+  if (x==0 || y==0 || z==0)
+    return;
 
   int sx = x + (1-(xbit<<1));
   int sy = y + (1-(ybit<<1));
@@ -525,78 +489,10 @@ void writeBackTriCounts(int octant, int xbit, int ybit, int zbit,
   globalBin[getGlobalBinId(octant, dx, dy, dz)] = bin[getLocalBinId(octant, sx, sy, sz)];
 }
 
-// The following accumulateBins function divides the BIN size by Nx/Ny/Nz threads, not Nx-1/Ny-1/Nz-1
-// TODO: which one is better? For simplicity, I will use the one using Nx-1/Ny-1/Nz-1.
-#if 0
 inline __device__
 void accumulateBins(int* bin, int* reorderBin, int* globalBin, int* scanBuffer, int* scanHeader)
 {
-  int numThreads = blockDim.x * blockDim.y * blockDim.z;
-
-  int binsPerThreadX = (BIN_COUNT_X + blockDim.x - 1) / blockDim.x;
-  int binsPerThreadY = (BIN_COUNT_Y + blockDim.y - 1) / blockDim.y;
-  int binsPerThreadZ = (BIN_COUNT_Z + blockDim.z - 1) / blockDim.z;
-
-  // int tid = getLinearThreadId();
-
-  for (int bchunkZ=0; bchunkZ<binsPerThreadZ; ++bchunkZ) {
-    for (int bchunkY=0; bchunkY<binsPerThreadY; ++bchunkY) {
-      for (int bchunkX=0; bchunkX<binsPerThreadX; ++bchunkX) {
-
-        for (int octant=0; octant<8; ++octant)
-        {
-
-          // bottom: sw(0), se(1), nw(2), ne(3)
-          // top   : sw(4), se(5), nw(6), ne(7)
-          int xbit = octant & 0x1;
-          int ybit = (octant >> 1) & 0x1;
-          int zbit = (octant >> 2) & 0x1;
-
-          // 1. fetch counter values from global memory
-          fetchBins(octant, xbit, ybit, zbit,
-                    bchunkX, bchunkY, bchunkZ,
-                    binsPerThreadX, binsPerThreadY, binsPerThreadZ,
-                    globalBin, bin);
-          __syncthreads();
-
-          for (int dim=0; dim<3; ++dim)
-          {
-            // 2. add partial sums
-            addPartialSums(dim, octant, xbit, ybit, zbit, bin);
-            __syncthreads();
-
-            // 3. reorder counter values
-            orientBins(dim, octant, xbit, ybit, zbit, bin, reorderBin);
-            __syncthreads();
-
-            // 4. populate heads
-            populateScanHeaders(scanHeader);
-            __syncthreads();
-
-            // 5. evaluate prefix sums
-            evaluatePrefixSums(octant, xbit, ybit, zbit,
-                               reorderBin, scanHeader, scanBuffer, bin);
-            __syncthreads();
-          }
-
-          // 6. write results back to global memory
-          //
-          // TODO: better to write back for all octants at once?
-          // for now, let's do it on a octant basis.
-          //
-          writeBackTriCounts(octant, xbit, ybit, zbit, bin, globalBin);
-          __syncthreads();
-        }
-      }
-    }
-  }
-}
-#endif
-
-inline __device__
-void accumulateBins(int* bin, int* reorderBin, int* globalBin, int* scanBuffer, int* scanHeader)
-{
-  int numThreads = blockDim.x * blockDim.y * blockDim.z;
+  int numThreads = getNumThreads();
 
   // Each denominator subtracts 1 from the block size due to the ghost cell.
   int binsPerThreadX = (BIN_COUNT_X + blockDim.x - 1) / (blockDim.x-1);
@@ -641,7 +537,7 @@ void accumulateBins(int* bin, int* reorderBin, int* globalBin, int* scanBuffer, 
             __syncthreads();
 
             // 4. evaluate prefix sums
-            evaluatePrefixSums(octant, xbit, ybit, zbit,
+            evaluatePrefixSums(dim, octant, xbit, ybit, zbit,
                                reorderBin, scanHeader, scanBuffer, bin);
             __syncthreads();
           }
@@ -661,7 +557,7 @@ void accumulateBins(int* bin, int* reorderBin, int* globalBin, int* scanBuffer, 
 }
 
 __device__
-void evaluateOctantBounds(int octant, const Aabb& node, const float3& point, Aabb& bounds);
+Aabb getOctantBounds(int octant, const Aabb& node, const float3& point)
 {
   // bottom: sw(0), se(1), nw(2), ne(3)
   // top   : sw(4), se(5), nw(6), ne(7)
@@ -680,7 +576,10 @@ void evaluateOctantBounds(int octant, const Aabb& node, const float3& point, Aab
   float3 pmin = make_float3(xmin, ymin, zmin); 
   float3 pmax = make_float3(xmax, ymax, zmax); 
 
+  Aabb bounds;
   bounds.set(pmin, pmax);
+
+  return bounds;
 }
 
 inline __device__
@@ -696,15 +595,14 @@ void evaluateSAHCosts(const int3& sampleId, const int* bin, const Aabb& nodeBoun
     // int y = threadIdx.y + ybit;
     // int z = threadIdx.z + zbit;
 
-    int tcount = bin[getLocalBinId(octant, threadIdx.x, threadIdx.y, threadIdx.z)];
+    float3 sample = nodeBounds[0] + make_float3(sampleId.x * step.x,
+                                                sampleId.y * step.y,
+                                                sampleId.z * step.z);
 
-    float3 sample = nodeBounds + make_float3(sampleId.x * step.x,
-                                             sampleId.y * step.y,
-                                             sampleId.z * step.z);
-    Aabb box;
-    evaluateOctantBounds(octant, nodeBounds, sample, box);
+    Aabb box = getOctantBounds(octant, nodeBounds, sample);
     float area = box.area();
 
+    int tcount = bin[getLocalBinId(octant, threadIdx.x, threadIdx.y, threadIdx.z)];
     sum += (area * tcount);
   }
 
@@ -738,7 +636,7 @@ inline __device__
 void sampleSplitPoint(const Node& node, const int* globalBin, int* bin, float* cost, int* index,
                       float* minCost, int* minIndex)
 {
-  int numThreads = blockDim.x * blockDim.y * blockDim.z;
+  int numThreads = getNumThreads();
   int tid = getLinearThreadId();
 
   bool minThreadId = (threadIdx.x==0 && threadIdx.y==0 && threadIdx.z==0);
@@ -782,110 +680,166 @@ void sampleSplitPoint(const Node& node, const int* globalBin, int* bin, float* c
   }
 }
 
-// TODO: The following function is incomplete.
 inline __device__
-void createChildNodes(const Node& node, const int* minIndex,
-                      int* triHit, int* triListOffset,
-                      Node* tree, int* triList, int* outPoolIndex)
+bool determineLeaf(int treeLevel)
+{
+  return (treeLevel >= MAX_TREE_DEPTH);
+}
+
+inline __device__
+void createChildNodes(Node& node,
+                      const int* minIndex, // smem, size=3
+                      int* globalTriList,
+                      const int3* indices,
+                      const float3* vertices,
+                      int* scanBuf, // smem, size=thread block
+                      int* partialSum, // smem, size=8, one for each octant
+                      Node* globalTree,
+                      int* outPoolIndex,
+                      int* numOutputNodes)
 {
   int tid = getLinearThreadId();
-  int numThreads = blockDim.x * blockDim.y * blockDim.z;
+  int numThreads = getNumThreads();
 
-  // do triangle-octant intersection tests
-  int trianglesPerThread = (node.numTriangles + numThreads - 1) / numThreads;
-  
-  for (int tchunk=0; tchunk<trianglesPerThread; ++tchunk)
-  {
-    int triId;
-    triBox[tid].invalidate();
-
-    int offset = numThreads * tchunk + tid;
-
-    if (offset < node.numTriangles)
-    {
-      triId = globalTriList[node.triListBase + offset];
-      const int3 vindex = indices[triId];
-      triBox[tid].set(vertices[vindex.x], vertices[vindex.y], vertices[vindex.z]);
-    }
-    __syncthreads();
-
-    float3 point = getPointFromBounds(node.bounds, minIndex[0], minIndex[1], minIndex[2]);
-
-    // for all triangles in shared mem
-    for (int t=0; t<numThreads; ++t)
-    {
-      Aabb& tbox = triBox[t];
-
-      for (int o=0; o<8; ++o)
-      {
-        Aabb octant;
-        evaluateOctantBounds(o, node.bounds, point, octant)
-        int triHit[tid] = (tbox.valid() && octant.intersects(tbox));
-        __syncthreads();
-        
-        int triListOffset[tid] = incScanBlock(tid, triHit[tid], scratch, numThreads);
-        __syncthreads();
-
-        if (triHit[tid])
-        {
-          // need to compute alpha
-          int index = [triListOffset[tid] - 1] + alpha;
-          globalTriList[index] = triId;
-        }
-        __syncthreads();
-
-      }
-    }
-  }
-
-  // create nodes
-  for (int o=0; o<8; ++o)
+  // set the node to a leaf if the sample is at a corner.
+  if (isCornerSample(minIndex[0], minIndex[1], minIndex[2]))
   {
     if (tid==numThreads-1)
     {
-      Node child;
-      int level= node.level+1;
-      child.id = (1<<(3*level)) + node.id + o;
-      child.bounds = octant;
-      child.numTriangles = triHit[tid];
-      child.triListBase
-      child.triListBase
-      child.level = level;
-      tree[o] = Node();
+      // TODO: we only need to udpate isLeaf, not all member variables.
+      node.isLeaf = true;
+      globalTree[node.id] = node;
     }
+    return;
   }
+
+  // initialize partial sums
+  if (tid<8)
+  {
+    partialSum[tid] = 0;
+  }
+ 
+  int trianglesPerThread = (node.numTriangles + numThreads - 1) / numThreads;
+
+  for (int tchunk=0; tchunk<trianglesPerThread; ++tchunk)
+  {
+    int triId = -1;
+    Aabb triBox;
+    triBox.invalidate();
+
+    const int toffset = numThreads * tchunk + tid;
+
+    // 1. evaluate my triangle bounds
+    if (toffset < node.numTriangles)
+    {
+      int base = getGlobalTriListBase(node.level, node.octant, node.firstHalf);
+      int triId = globalTriList[base + toffset];
+      const int3 vindex = indices[triId];
+      triBox.set(vertices[vindex.x], vertices[vindex.y], vertices[vindex.z]);
+    }
+    // __syncthreads();
+
+    // 2. evaluate the point to split
+    float3 point = getSampleFromBounds(node, minIndex[0], minIndex[1], minIndex[2]);
+
+    for (int o=0; o<8; ++o) // for each octant o
+    {
+      // 3. evaluate the octant bound
+      Aabb octant = getOctantBounds(o, node.bounds, point);
+
+      if (octant.volume() > 0)
+      {
+        const Aabb& tbox = triBox;
+        
+        // TODO: check if box-to-box test is a good solution.
+        //       perhaps, box-to-triangle could be a better method?
+        // 4. do a trinagle-octant intersection test
+        int triHit = (tbox.valid() && octant.intersects(tbox));
+        __syncthreads();
+        
+        // 5. scan over triHit to get offset into globalTriList
+        int triListOffset = incScanBlock(tid, triHit, scanBuf, numThreads);
+        __syncthreads();
+        
+        // TODO: for now, let's assume equal distribution of triangles
+        // TODO: should it be faster to buffer triangle IDs into shared memeory
+        //       and write them back to global memory later at once?
+        //
+        // 6. update globalTriList with triangle IDs if they belong to the octant
+        if (triHit)
+        {
+          int base = getGlobalTriListBase((node.level+1), o, (!node.firstHalf));
+          globalTriList[partialSum[o] + base + triListOffset - 1] = triId;
+        }
+
+        if (tid==numThreads-1)
+        {
+          // 7. update the partial sum
+          int base = getGlobalTriListBase((node.level+1), o, (!node.firstHalf));
+          partialSum[o] = partialSum[o] + base + triListOffset;
+
+          // TODO: check if outPoolIndex is within the bound.
+          if (tchunk==trianglesPerThread-1)
+          {
+            // 8. update # of output nodes as well as the child pointer
+            int outNodeCount = atomicAdd(numOutputNodes, 1);
+
+            int childId = atomicAdd(outPoolIndex, 1);
+            node.child[o] = childId;
+            
+            // 9. create a child node
+            Node cn;
+            bool isLeaf = determineLeaf(node.level+1); 
+            cn.updateAllButChild(childId, (node.level+1), o, octant, isLeaf, triListOffset, (!node.firstHalf));
+            globalTree[childId] = cn;
+          }
+        }
+      } // if (octant.volume() > 0)
+
+      // TODO: do we need to update all member variables at once?
+      //       i.e. not all of them need to be udpated.
+      //       we only need to update child[8], 32B.
+      // 10. update the parent node's child pointers
+      if (tid==numThreads-1 && tchunk==trianglesPerThread-1 && o==7)
+      {
+        globalTree[node.id] = node; 
+      }
+    } // for (int o=0; o<8; ++o) // for each octant o
+  } // for (int tchunk=0; tchunk<trianglesPerThread; ++tchunk)
 }
 
-__device__
+inline __device__
 void buildOctree(const int3* indices, const float3* vertices,
-                 const Node& node, Node* tree, int* triList, int* outPoolIndex,
+                 Node& node, Node* globalTree, int* globalTriList,
+                 int* outPoolIndex, int* numOutputNodes,
                  Aabb* triBox, int* bin, int* reorderBin, int* globalBin,
                  int* scanBuffer, int* scanHeader, float* sahCost,
                  float* minCost, int* minIndex)
 {
+  if (node.isLeaf)
+    return;
 
-  checkTermination()
-  __syncthreads(); //TODO: necessary?
-
-  populateBins(triList, indices, vertices, node, triBox, bin, globalBin);
-  __syncthreads(); //TODO: necessary?
+  populateBins(indices, vertices, node, globalTriList, triBox, bin, globalBin);
+  __syncthreads();
 
   accumulateBins(bin, reorderBin, globalBin, scanBuffer, scanHeader);
-  __syncthreads(); //TODO: necessary?
+  __syncthreads();
 
   // note: reorderBin is also used to maintain thread indices
   sampleSplitPoint(node, globalBin, bin, sahCost, reorderBin, minCost, minIndex);
-  __syncthreads(); //TODO: necessary?
+  __syncthreads();
 
-  createChildNodes(node, minIndex, tree, triList, outPoolIndex);
-  __syncthreads(); //TODO: necessary?
+  createChildNodes(node, minIndex, globalTriList, indices, vertices,
+                   scanBuffer, scanHeader, globalTree,
+                   outPoolIndex, numOutputNodes); 
+  // __syncthreads();
 }
 
 __global__
 void buildKernel(const int3* indices, const float3* vertices,
                  const int* numInputNodes, int* numOutputNodes,
                  int* inPoolIndex, int* outPoolIndex,
-                 Node* tree, int* triangleList, int* globalBin)
+                 Node* globalTree, int* globalTriList, int* globalBin)
 {
   // for maintaining work pools
   __shared__ Node localPool[BATCH_SIZE];
@@ -896,10 +850,6 @@ void buildKernel(const int3* indices, const float3* vertices,
 
   // for counting triangles
   __shared__ Aabb triBox[CUDA_BLOCK_SIZE];
-
-  // __shared__ int triHit[TRI_HIT_SIZE];
-  // __shared__ int triListOffset[TRI_LIST_OFFSET];
-
   __shared__ int bin[BIN_SIZE]; // triangle counts
   __shared__ int reorderBin[REORDER_BIN_SIZE];
   __shared__ int scanBuffer[SCAN_BUFFER_SIZE];
@@ -909,8 +859,8 @@ void buildKernel(const int3* indices, const float3* vertices,
   __shared__ float minCost;
   __shared__ int minIndex[3];
 
-  bool fetcherThread = (threadIdx.x==0 && threadIdx.y==0 && threadIdx.z==0);
   int tid = getLinearThreadId();
+  bool fetcherThread = (tid==0);
 
   if (fetcherThread)
   {
@@ -934,7 +884,7 @@ void buildKernel(const int3* indices, const float3* vertices,
 
       // exit if no more work left
       if (baseIdx >= inPoolSize)
-        return  
+        return;
 
       // fetch work from the work pool in global memory
       if (tid < BATCH_SIZE)
@@ -945,7 +895,7 @@ void buildKernel(const int3* indices, const float3* vertices,
         // fetch work if within the range
         if (index < inPoolSize)
         {
-          localPool[tid] = inputPool[index];
+          localPool[tid] = globalTree[index];
         }
       }
     }
@@ -955,7 +905,8 @@ void buildKernel(const int3* indices, const float3* vertices,
     if (localPool[localPoolIdx].id >= 0)
     {
       buildOctree(indices, vertices,
-                  localPool[localPoolIdx], tree, triangleList, outPoolIndex,
+                  localPool[localPoolIdx], globalTree, globalTriList,
+                  outPoolIndex, numOutputNodes,
                   triBox, bin, reorderBin, globalBin, scanBuffer, scanHeader, sahCost,
                   &minCost, minIndex);
     }
@@ -987,64 +938,6 @@ void updateHitBuffer(const Hit& closest, Hit* hitBuf)
   hitBuf->v = closest.v;
 }
 
-// inline __device__ bool intersect(const Ray& ray, const int3* indices, const float3* vertices, int triId, Hit& isect) {
-//   const int3 tri = indices[triId];
-//   const float3 a = vertices[tri.x];
-//   const float3 b = vertices[tri.y];
-//   const float3 c = vertices[tri.z];
-//   const float3 e1 = b - a;
-//   const float3 e2 = c - a;
-//   const float3 p_vec = cross(ray.dir, e2);
-//   float det = dot(e1, p_vec);
-//   if (det > -kEpsilon && det < kEpsilon)
-//     return false;
-//   float inv_det = 1.0f / det;
-//   float3 t_vec = ray.origin - a;
-//   float3 q_vec = cross(t_vec, e1);
-//   float t = dot(e2, q_vec) * inv_det;
-//   // Do not allow ray origin in front of triangle
-//   if (t < 0.0f)
-//     return false;
-//   float u = dot(t_vec, p_vec) * inv_det;
-//   if (u < 0.0f || u > 1.0f)
-//     return false;
-//   float v = dot(ray.dir, q_vec) * inv_det;
-//   if (v < 0.0f || u + v > 1.0f)
-//     return false;
-// 
-//   isect.t = t;
-//   isect.triId = triId;
-//   isect.u = u;
-//   isect.v = v;
-//   return true;
-// }
-
-// __global__ void simpleTraceKernel(const Ray* rays,
-//                                   const int3* indices, const float3* vertices,
-//                                   int rayCount, int triCount,
-//                                   Hit* hits) {
-//   int rayIdx = threadIdx.x + blockIdx.x*blockDim.x;
-// 
-//   if (rayIdx >= rayCount) {
-//     return;
-//   }
-//   
-//   Hit closest;
-//   closest.t = NPP_MAXABS_32F;
-//   closest.triId = -1;
-//   const Ray& ray = *(rays + rayIdx);
-//   for (int t=0; t<triCount; ++t) { // triangles
-//     Hit isect;
-//     if (intersect(ray, indices, vertices, t, isect)) {
-//       //printf("intersect!\n");
-//       if (isect.t < closest.t) {
-//         updateClosest(isect, closest);
-//       }
-//     }
-//   }
-//   updateHitBuffer(closest, (hits+rayIdx));
-// }
-
 CUDAOctreeRenderer::CUDAOctreeRenderer(const ConfigLoader& config)
 : RTPSimpleRenderer(config) {}
 
@@ -1061,13 +954,6 @@ void CUDAOctreeRenderer::render()
                       scene.numTriangles * sizeof(int3), cudaMemcpyHostToDevice));
   CHK_CUDA(cudaMemcpy(d_vertices, scene.vertices,
                       scene.numTriangles * sizeof(float3), cudaMemcpyHostToDevice));
-
-  // // create tree info
-  // TreeInfo h_treeInfo;
-  // h_treeInfo.createRoot();
-  // TreeInfo* d_treeInfo;
-  // CHK_CUDA(cudaMalloc((void**)&d_treeInfo, sizeof(TreeInfo)));
-  // CHK_CUDA(cudaMemcpy(d_treeInfo, &h_treeInfo, sizeof(TreeInfo), cudaMemcpyHostToDevice));
 
   // maintain # nodes to process and # newly created nodes
   int* d_numInputNodes;
@@ -1087,22 +973,24 @@ void CUDAOctreeRenderer::render()
 
   // create root node
   Node* h_octree = new Node;
-  h_octree->id = 0
+  h_octree->id = 0;
   h_octree->level = 0;
+  h_octree->octant = 0;
   h_octree->bounds = Aabb(scene.bbmin, scene.bbmax);
   h_octree->isLeaf = false;
-  h_octree->triListBase = 0;
   h_octree->numTriangles = scene.numTriangles;
   for (int o=0; o<8; ++o)
+  {
     h_octree->child[o] = -1;
+  }
   h_octree->firstHalf = true;
-  Node* d_octree;
-  CHK_CUDA(cudaMalloc((void**)&d_octree, MAX_NUM_NODES * sizeof(Node)));
-  CHK_CUDA(cudaMemcpy(d_octree, h_octree, sizeof(Node), cudaMemcpyHostToDevice));
+  Node* d_tree;
+  CHK_CUDA(cudaMalloc((void**)&d_tree, MAX_NUM_NODES * sizeof(Node)));
+  CHK_CUDA(cudaMemcpy(d_tree, h_octree, sizeof(Node), cudaMemcpyHostToDevice));
 
   // create triangle lists
-  int* d_triangleList;
-  CHK_CUDA(cudaMalloc((void**)&d_triangleList, TRIANGLE_LIST_SIZE * sizeof(int)));
+  int* d_triList;
+  CHK_CUDA(cudaMalloc((void**)&d_triList, TRI_LIST_SIZE * sizeof(int)));
 
   // bins to store triangle counts
   int* d_bin;
@@ -1110,7 +998,7 @@ void CUDAOctreeRenderer::render()
 
   // build(d_indices, d_vertices, d_workPoolA, d_workPoolB, d_bin);
   build(d_indices, d_vertices, d_numInputNodes, d_numOutputNodes,
-        d_inPoolIndex, d_outPoolIndex, d_octree, d_triangleList, d_bin);
+        d_inPoolIndex, d_outPoolIndex, d_tree, d_triList, d_bin);
   // trace(d_indices, d_vertices);
 
   cudaFree(d_indices);
@@ -1119,7 +1007,7 @@ void CUDAOctreeRenderer::render()
   cudaFree(d_numOutputNodes);
   cudaFree(d_inPoolIndex);
   cudaFree(d_outPoolIndex);
-  cudaFree(d_octree);
+  cudaFree(d_tree);
   cudaFree(d_bin);
 
   delete [] h_octree;
@@ -1127,7 +1015,8 @@ void CUDAOctreeRenderer::render()
 
 void CUDAOctreeRenderer::build(const int3* indices, const float3* vertices,
                                int* d_numInputNodes, int* d_numOutputNodes,
-                               Node* d_octree, int* d_triangleList, int* d_bin)
+                               int* d_inPoolIndex, int* d_outPoolIndex,
+                               Node* d_tree, int* d_triList, int* d_bin)
 {
   // TODO: Use Occupancy APIs to determine grid and block sizes
   // supported for CUDA 6.5 and above
@@ -1147,9 +1036,9 @@ void CUDAOctreeRenderer::build(const int3* indices, const float3* vertices,
     buildKernel<<<gridDim, blockDim>>>(indices, vertices,
                                        d_numInputNodes, d_numOutputNodes,
                                        d_inPoolIndex, d_outPoolIndex,
-                                       d_octree, d_triangleList, d_bin);
+                                       d_tree, d_triList, d_bin);
     cudaDeviceSynchronize();
-    CHK_CUDA(cudaMemcpy(h_workLeft, d_numOutputNodes, sizeof(int), cudaMemcpyDeviceToHost));
+    CHK_CUDA(cudaMemcpy(&h_workLeft, d_numOutputNodes, sizeof(int), cudaMemcpyDeviceToHost));
   }
 }
 

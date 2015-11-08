@@ -106,4 +106,3 @@ void CUDASimpleRenderer::simpleTraceOnDevice(const int3* indices, const float3* 
                                                        scene.numTriangles,
                                                        hitBuffer.ptr());
 }
-

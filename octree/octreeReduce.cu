@@ -25,6 +25,7 @@ void minReduce(const int tid, const int size, volatile float* data, volatile int
   // The reduced values are in data[0] and index[0].
 }
 
+__device__
 void minReduceWarp(const int tid, volatile float* data, volatile int* index, const int warpSize=32)
 {
   int lane = tid & (warpSize-1);
@@ -45,6 +46,7 @@ void minReduceWarp(const int tid, volatile float* data, volatile int* index, con
   // The reduced values are in data[0] and index[0].
 }
 
+__device__
 void minReduceBlock(const int tid, const int size, volatile float* data, volatile int* index,
                     const int warpSize=32, const int logWarpSize=5)
 {

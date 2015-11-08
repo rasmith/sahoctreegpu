@@ -5,7 +5,8 @@
 #include "renderer.h"
 #include "configLoader.h"
 
-class RTPSimpleRenderer : public Renderer {
+class RTPSimpleRenderer : public Renderer
+{
 public:
   RTPSimpleRenderer(const ConfigLoader& config);
   virtual ~RTPSimpleRenderer() {}
