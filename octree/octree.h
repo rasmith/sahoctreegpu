@@ -223,6 +223,7 @@ struct NodeStorage {
     if (nodes) delete[] nodes;
   }
   static __host__ void freeOnGpu(NodeStorage<LayoutType> *d_layout) {
+    LOG(DEBUG) << "freeOnGpu: d_layout = " << d_layout << "\n";
     NodeStorage<LayoutType> storage;
     CHK_CUDA(cudaMemcpy((void *)(&storage), (const void *)(d_layout),
                         sizeof(NodeStorage<LayoutType>),
@@ -250,11 +251,14 @@ struct NodeStorage<LAYOUT_SOA> {
   }
   static __host__ void freeOnGpu(NodeStorage<LAYOUT_SOA> *d_layout) {
     NodeStorage<LAYOUT_SOA> storageSoa;
-    LOG(DEBUG) << "NodeStorage<LAYOUT_SOA>::freeOnGpu\n";
+    LOG(DEBUG) << "NodeStorage<LAYOUT_SOA>::freeOnGpu: d_layout = " << d_layout
+               << " sizeof(NodeStorage<LAYOUT_SOA>) = "
+               << sizeof(NodeStorage<LAYOUT_SOA>) << "\n";
     CHK_CUDA(cudaMemcpy((void *)(&storageSoa), (const void *)(d_layout),
                         sizeof(NodeStorage<LAYOUT_SOA>),
                         cudaMemcpyDeviceToHost));
-    LOG(DEBUG) << "Free headers\n";
+    LOG(DEBUG) << "Free headers: storageSoa.headers = " << storageSoa.headers
+               << "\n";
     CHK_CUDA(cudaFree((void *)(storageSoa.headers)));
     LOG(DEBUG) << "Free footers\n";
     CHK_CUDA(cudaFree((void *)(storageSoa.footers)));
@@ -313,6 +317,7 @@ struct NodeStorageCopier<LAYOUT_SOA, LAYOUT_SOA> {
             const NodeStorage<LAYOUT_AOS> *src) const {}
   void copyToGpu(NodeStorage<LAYOUT_SOA> *d_dest,
                  const NodeStorage<LAYOUT_SOA> *src) {
+    LOG(DEBUG) << "copyToGpu: d_dest = " << d_dest << " src = " << src << "\n";
     // Copy the headers.
     OctNodeHeader *d_headers = NULL;
     CHK_CUDA(cudaMalloc((void **)(&d_headers),
@@ -736,6 +741,9 @@ class Octree {
   }
   inline __device__ __host__ uint32_t numVertices() const {
     return m_numVertices;
+  }
+  inline __device__ __host__ uint32_t getTriangleId(uint32_t i) const {
+    return m_triangleIndices[i];
   }
 
  private:

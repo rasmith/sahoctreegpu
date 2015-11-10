@@ -125,7 +125,7 @@ if(USING_CLANG_C)
 endif()
 
 # Find at least a 2.3 version of CUDA.
-find_package(CUDA 2.3 REQUIRED)
+find_package(CUDA 3.5 REQUIRED)
 
 # Present the CUDA_64_BIT_DEVICE_CODE on the default set of options.
 mark_as_advanced(CLEAR CUDA_64_BIT_DEVICE_CODE)
@@ -135,7 +135,10 @@ mark_as_advanced(CLEAR CUDA_64_BIT_DEVICE_CODE)
 # block of code will not be executed leaving you free to edit the values as much as you
 # wish from the GUI or from ccmake.
 if(NOT PASSED_FIRST_CONFIGURE)
-  set(flag "--use_fast_math")
+  set(flag "-g")
+  set(flag "-G")
+  set(flag "--keep")
+  set(flag "-arch=compute_35")
   list(FIND CUDA_NVCC_FLAGS ${flag} index)
   if(index EQUAL -1)
     list(APPEND CUDA_NVCC_FLAGS ${flag})

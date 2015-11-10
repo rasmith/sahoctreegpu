@@ -398,13 +398,15 @@ inline __device__ __host__ bool intersectOctree(
   bool objectHit = false;
   Hit isect;
 
+  uint32_t outer_iters = 0, inner_iters = 0;
+  bool bad = true;
   // Put the root onto the stack.
   nodeIdStack[0] = 0;
   aabbStack[0] = octree->aabb();
   intersectAabb(ray.origin, invDirection, aabbStack[0], 0.0f, NPP_MAXABS_32F,
                 &tNearStack[0], &tFarStack[0]);
-
   while (!terminateRay) {
+    inner_iters = 0;
     while (!(stackEmpty = (stackEnd <= 0)) &&
            !(headers[currentId = nodeIdStack[--stackEnd]].type == NODE_LEAF)) {
       // Get current node to process.
@@ -429,6 +431,11 @@ inline __device__ __host__ bool intersectOctree(
         octant = octant ^ events[i].mask;
         bool hasChild = ((octantBits & (0x1 << octant)) != 0);
         numValidEvents += hasChild;
+        if (i > 5) {
+          bad = true;
+          terminateRay = true;
+          return false;
+        }
       }
       // Add the children in reverse order of being hit to the stack.  This way,
       // the child that was hit first gets popped first.
@@ -445,22 +452,48 @@ inline __device__ __host__ bool intersectOctree(
           tNearStack[nextStack] = events[i].t;
           tFarStack[nextStack] = events[i + 1].t;
         }
+        if (i > 5) {
+          bad = true;
+          terminateRay = true;
+          return false;
+        }
       }
       stackEnd += numValidEvents;
+      ++inner_iters;
+      if (inner_iters > 64000) {
+        bad = true;
+        terminateRay = true;
+        return false;
+      }
     }
-    uint32_t numPrimitives = (stackEmpty ? 0 : footers[currentId].leaf.size);
+    currentHeader = (stackEmpty ? NULL : &headers[currentId]);
+    currentFooter = (stackEmpty ? NULL : &footers[currentId]);
+    uint32_t numPrimitives = (stackEmpty ? 0 : currentFooter->leaf.size);
+    uint32_t offset = (stackEmpty ? 0 : currentHeader->offset);
     tNear = (stackEmpty ? 0.0f : tNearStack[stackEnd]);
     tFar = (stackEmpty ? 0.0f : tFarStack[stackEnd]);
     triangleHit = false;
     for (uint32_t i = 0; i < numPrimitives; ++i) {
-      if (intersectTriangle(ray, indices, vertices, i, isect) &&
+      uint32_t triId = octree->getTriangleId(i + offset);
+      if (intersectTriangle(ray, indices, vertices, triId, isect) &&
           isect.t < closest.t) {
         updateClosest(isect, closest);
         triangleHit = true;
       }
+      if (i > 32) {
+        bad = true;
+        terminateRay = true;
+        return false;
+      }
     }
     objectHit = triangleHit && closest.t >= tNear && closest.t <= tFar;
     terminateRay = objectHit || stackEmpty;
+    ++outer_iters;
+    if (outer_iters > 32) {
+      bad = true;
+      terminateRay = true;
+      return false;
+    }
   }
   return objectHit;
 }
@@ -471,30 +504,27 @@ __global__ void traceKernel(const Ray* rays, const int3* indices,
                             const Octree<LAYOUT_SOA>* octree,
                             const int triCount, Hit* hits) {
   int rayIdx = threadIdx.x + blockIdx.x * blockDim.x;
-
-  if (rayIdx >= rayCount) {
-    return;
-  }
-
-  Hit closest;
-  Hit isect;
-  closest.t = NPP_MAXABS_32F;
-  closest.triId = -1;
-  const Ray& ray = *(rays + rayIdx);
+  if (rayIdx < rayCount) {
+    Hit closest;
+    Hit isect;
+    closest.t = NPP_MAXABS_32F;
+    closest.triId = -1;
+    const Ray& ray = *(rays + rayIdx);
 #ifdef USE_OCTREE
-  if (intersectOctree(ray, indices, vertices, octree, isect) &&
-      isect.t < closest.t) {
-    updateClosest(isect, closest);
-  }
-#else
-  for (int t = 0; t < triCount; ++t) {  // triangles
-    if (intersectTriangle(ray, indices, vertices, t, isect) &&
+    if (intersectOctree(ray, indices, vertices, octree, isect) &&
         isect.t < closest.t) {
       updateClosest(isect, closest);
     }
-  }
+#else
+    for (int t = 0; t < triCount; ++t) {  // triangles
+      if (intersectTriangle(ray, indices, vertices, t, isect) &&
+          isect.t < closest.t) {
+        updateClosest(isect, closest);
+      }
+    }
 #endif
-  updateHitBuffer(closest, (hits + rayIdx));
+    updateHitBuffer(closest, (hits + rayIdx));
+  }
 }
 
 CUDAOctreeRenderer::CUDAOctreeRenderer(const ConfigLoader& config)
@@ -536,9 +566,9 @@ void CUDAOctreeRenderer::buildFromFile(Octree<LAYOUT_SOA>* d_octree) {
   Octree<LAYOUT_SOA> octreeFileSoa;
   octreeFileSoa.copy(octreeFileAos);
   octreeFileSoa.copyToGpu(d_octree);
-  Octree<LAYOUT_SOA> octreeFileSoaCheck;
-  octreeFileSoaCheck.copyFromGpu(d_octree);
-  LOG(DEBUG) << octreeFileSoaCheck << "\n";
+  //  Octree<LAYOUT_SOA> octreeFileSoaCheck;
+  //  octreeFileSoaCheck.copyFromGpu(d_octree);
+  //  LOG(DEBUG) << octreeFileSoaCheck << "\n";
 }
 
 void CUDAOctreeRenderer::build(Octree<LAYOUT_SOA>* d_octree) {
@@ -560,14 +590,20 @@ void CUDAOctreeRenderer::traceOnDevice(const int3* indices,
   const int numThreadsPerBlock = 256;
   const int numBlocks =
       (rayBuffer.count() + numThreadsPerBlock - 1) / numThreadsPerBlock;
+  LOG(DEBUG) << "numThreadsPerBlock = " << numThreadsPerBlock
+             << " numBlocks = " << numBlocks << "\n";
 
   Octree<LAYOUT_SOA>* d_octree = NULL;
   CHK_CUDA(cudaMalloc((void**)(&d_octree), sizeof(Octree<LAYOUT_SOA>)));
+
   build(d_octree);
 
+  LOG(DEBUG) << "Ray tracing...\n";
   traceKernel << <numBlocks, numThreadsPerBlock>>>
       (rayBuffer.ptr(), indices, vertices, rayBuffer.count(), d_octree,
        scene.numTriangles, hitBuffer.ptr());
+  cudaDeviceSynchronize();
+  LOG(DEBUG) << "Done...\n";
   Octree<LAYOUT_SOA>::freeOnGpu(d_octree);
   CHK_CUDA(cudaFree((void*)(d_octree)));
 }

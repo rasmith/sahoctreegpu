@@ -103,9 +103,9 @@ struct Logger {
 
 static const LogLevel LOG_LEVEL = LOG_DEBUG;
 
-#define LOG(stream)                                                     \
-  (Logger<LOG_LEVEL>::stream() << "LOG(" << #stream << ")(" << __LINE__ \
-                               << "): ")
+#define LOG(stream)                                                            \
+  (Logger<LOG_LEVEL>::stream() << "LOG(" << #stream << ")(" << __FILE__ << ":" \
+                               << __LINE__ << "): ")
 }  // namespace oct
 
 #endif  // LOG_H_
