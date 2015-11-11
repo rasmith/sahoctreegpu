@@ -460,11 +460,16 @@ inline __device__ __host__ bool intersectOctree(
       }
       stackEnd += numValidEvents;
       ++inner_iters;
-      if (inner_iters > 64000) {
-        bad = true;
-        terminateRay = true;
-        return false;
+      if (inner_iters > 64 && inner_iters < 74) {
+         printf("currentId = %d, octantBits = %d, octant = %d,\
+                 numEvents = %d, numValidEvents = %d, stackEnd = %d\n",
+                 currentId, octantBits, octant, numEvents, numValidEvents,
+                 stackEnd);
       }
+      if (inner_iters > 128) {
+          terminateRay = true;
+          return false;
+       }
     }
     currentHeader = (stackEmpty ? NULL : &headers[currentId]);
     currentFooter = (stackEmpty ? NULL : &footers[currentId]);
