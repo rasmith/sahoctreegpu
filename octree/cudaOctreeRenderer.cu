@@ -10,8 +10,9 @@
 
 namespace oct {
 
-inline __device__ __host__ Aabb
-getChildBounds(const Aabb& bounds, const float3& center, uint32_t octant) {
+inline __device__ __host__ Aabb getChildBounds(const Aabb& bounds,
+                                               const float3& center,
+                                               uint32_t octant) {
   Aabb result;
   float3 min = bounds[0];
   float3 max = bounds[1];
@@ -122,7 +123,7 @@ inline __device__ __host__ bool intersectAabb(const float3& origin,
   if (tzmin > *tNear) *tNear = tzmin;
   if (tzmax < *tFar) *tFar = tzmax;
 
-  return *tNear < t1 && *tFar > t0;
+  return *tNear<t1&& * tFar> t0;
 }
 
 inline __device__ __host__ bool intersectTriangle(const Ray& ray,
@@ -251,14 +252,15 @@ inline __host__ __device__ __host__ void createEvents(
   validTable[0] = check0 & check01 & check02;
   validTable[1] = check1 & check01 & check12;
   validTable[2] = check2 & check02 & check12;
-  const unsigned char permutationTable[8][3] = {{0, 1, 2},  // 000
-                                                {1, 2, 0},  // 001
-                                                {1, 0, 2},  // 010
-                                                {2, 0, 1},  // 011
-                                                {0, 1, 2},  // 100
-                                                {0, 2, 1},  // 101
-                                                {0, 1, 2},  // 110
-                                                {0, 1, 2}   // 111
+  const unsigned char permutationTable[8][3] = {
+      {0, 1, 2},  // 000
+      {1, 2, 0},  // 001
+      {1, 0, 2},  // 010
+      {2, 0, 1},  // 011
+      {0, 1, 2},  // 100
+      {0, 2, 1},  // 101
+      {0, 1, 2},  // 110
+      {0, 1, 2}   // 111
   };
 
   // Compute masks according to table.
@@ -337,16 +339,24 @@ inline __device__ __host__ void getChildren(
     const OctNodeHeader* header, const OctNodeFooter<uint64_t>* footer,
     const OctNodeHeader* headers, uint32_t* children,
     unsigned char* hasChildBitmask) {
-  uint32_t numChildren = static_cast<uint32_t>(footer->internal.numChildren);
+  uint32_t numChildren =
+      static_cast<uint32_t>(footer->internal.numChildren) + 1;
   uint32_t offset = static_cast<uint32_t>(header->offset);
   unsigned char maskResult = 0x0;
+  uint32_t childId = 0;
   for (uint32_t i = 0; i < numChildren; ++i) {
-    children[i] = offset + i;
-    maskResult |= (0x1 << headers[children[i]].octant);
+    childId = offset + i;
+    children[headers[childId].octant] = childId;
+    maskResult |= (0x1 << headers[childId].octant);
   }
   *hasChildBitmask = maskResult;
 }
 
+//#define DEBUG_TRAVERSE
+#ifdef DEBUG_TRAVERSE
+//#define DEBUG_TRAVERSE_THREAD_ID 389308
+#define DEBUG_TRAVERSE_THREAD_ID 386858  // t = 0.485482
+#endif
 inline __device__ __host__ bool intersectOctree(
     const Ray& ray, const int3* indices, const float3* vertices,
     const Octree<LAYOUT_SOA>* octree, Hit& closest) {
@@ -354,21 +364,24 @@ inline __device__ __host__ bool intersectOctree(
   const uint32_t kMaxEvents = 4;
   const uint32_t kStackSize = kMaxEvents * kMaxDepth;
 
-  // NOTE:
-  //    1) We need to examine 4 nodes per octree node.
-  //    4) Because of (1), we create a stack of size:
-  //          4 * d  * B
-  //    where we need B bytes per node to store a reference on the stack.
-  // Here B = 4, since unsigned ints will be used.
-  //
-  // NOTE: With treelet demarcations, we could allow treelets
-  // of maximum size 16k nodes, so short ints could be use where B_16 = 2.
-  //
-  // NOTE: This uses thread-local storage - it is really global memory as
-  // opposed to shared memory.  The danger of using shared memory is that
-  // many threads may fetch the same node, so it might be best to let
-  // the GPU manage the cache on its own and hopefully we only fetch
-  // each node that we actually need.
+// NOTE:
+//    1) We need to examine 4 nodes per octree node.
+//    4) Because of (1), we create a stack of size:
+//          4 * d  * B
+//    where we need B bytes per node to store a reference on the stack.
+// Here B = 4, since unsigned ints will be used.
+//
+// NOTE: With treelet demarcations, we could allow treelets
+// of maximum size 16k nodes, so short ints could be use where B_16 = 2.
+//
+// NOTE: This uses thread-local storage - it is really global memory as
+// opposed to shared memory.  The danger of using shared memory is that
+// many threads may fetch the same node, so it might be best to let
+// the GPU manage the cache on its own and hopefully we only fetch
+// each node that we actually need.
+#ifdef DEBUG_TRAVERSE
+  int tid = threadIdx.x + blockIdx.x * blockDim.x;
+#endif
 
   const OctNodeHeader* headers = octree->nodeStorage().headers;
   const OctNodeFooter<uint64_t>* footers = octree->nodeStorage().footers;
@@ -398,15 +411,23 @@ inline __device__ __host__ bool intersectOctree(
   bool objectHit = false;
   Hit isect;
 
+#ifdef DEBUG_TRAVERSE
   uint32_t outer_iters = 0, inner_iters = 0;
-  bool bad = true;
+#endif
   // Put the root onto the stack.
   nodeIdStack[0] = 0;
   aabbStack[0] = octree->aabb();
   intersectAabb(ray.origin, invDirection, aabbStack[0], 0.0f, NPP_MAXABS_32F,
                 &tNearStack[0], &tFarStack[0]);
+#ifdef DEBUG_TRAVERSE_THREAD_ID
+  if (tid == DEBUG_TRAVERSE_THREAD_ID)
+    printf("origin = %f, %f, %f, direction = %f, %f, %f\n", ray.origin.x,
+           ray.origin.y, ray.origin.z, ray.dir.x, ray.dir.y, ray.dir.z);
+#endif
   while (!terminateRay) {
+#ifdef DEBUG_TRAVERSE
     inner_iters = 0;
+#endif
     while (!(stackEmpty = (stackEnd <= 0)) &&
            !(headers[currentId = nodeIdStack[--stackEnd]].type == NODE_LEAF)) {
       // Get current node to process.
@@ -431,12 +452,26 @@ inline __device__ __host__ bool intersectOctree(
         octant = octant ^ events[i].mask;
         bool hasChild = ((octantBits & (0x1 << octant)) != 0);
         numValidEvents += hasChild;
+#ifdef DEBUG_TRAVERSE
         if (i > 5) {
-          bad = true;
           terminateRay = true;
           return false;
         }
+#endif
       }
+#ifdef DEBUG_TRAVERSE_THREAD_ID
+      if (tid == DEBUG_TRAVERSE_THREAD_ID) {
+        printf(
+            "[%d] stackEnd = %d, currentId = %d, t_n = %f, t_f = %f, type = %d"
+            ", octant = %d  offset = %d, numChildren = %d, i = %d, j = %d,"
+            "  k = %d bits = %x numEvents =%d, numValidEvents = %d\n",
+            inner_iters, stackEnd, currentId, tNear, tFar, currentHeader->type,
+            currentHeader->octant, currentHeader->offset,
+            currentFooter->internal.numChildren + 1, currentFooter->internal.i,
+            currentFooter->internal.j, currentFooter->internal.k, octantBits,
+            numEvents, numValidEvents);
+      }
+#endif
       // Add the children in reverse order of being hit to the stack.  This way,
       // the child that was hit first gets popped first.
       int k = -1;  // keep track of which valid event we have
@@ -447,29 +482,36 @@ inline __device__ __host__ bool intersectOctree(
         k += hasChild;
         int nextStack = stackEnd + numValidEvents - k - 1;
         if (hasChild) {
+#ifdef DEBUG_TRAVERSE_THREAD_ID
+          if (tid == DEBUG_TRAVERSE_THREAD_ID)
+            printf("children[%d] = %d\n", octant, children[octant]);
+#endif
           nodeIdStack[nextStack] = children[octant];
           aabbStack[nextStack] = getChildBounds(currentBounds, center, octant);
           tNearStack[nextStack] = events[i].t;
           tFarStack[nextStack] = events[i + 1].t;
         }
         if (i > 5) {
-          bad = true;
           terminateRay = true;
           return false;
         }
       }
       stackEnd += numValidEvents;
+#ifdef DEBUG_TRAVERSE
       ++inner_iters;
       if (inner_iters > 64 && inner_iters < 74) {
-         printf("currentId = %d, octantBits = %d, octant = %d,\
-                 numEvents = %d, numValidEvents = %d, stackEnd = %d\n",
-                 currentId, octantBits, octant, numEvents, numValidEvents,
-                 stackEnd);
+        /*printf(*/
+        /*"tid = %d currentId = %d, octantBits = %d, octant = %d,\*/
+        /*numEvents = %d, numValidEvents = %d, stackEnd = %d\n",*/
+        /*tid,*/
+        /*currentId, octantBits, octant, numEvents, numValidEvents,*/
+        /*stackEnd);*/
       }
       if (inner_iters > 128) {
-          terminateRay = true;
-          return false;
-       }
+        terminateRay = true;
+        return false;
+      }
+#endif
     }
     currentHeader = (stackEmpty ? NULL : &headers[currentId]);
     currentFooter = (stackEmpty ? NULL : &footers[currentId]);
@@ -478,27 +520,40 @@ inline __device__ __host__ bool intersectOctree(
     tNear = (stackEmpty ? 0.0f : tNearStack[stackEnd]);
     tFar = (stackEmpty ? 0.0f : tFarStack[stackEnd]);
     triangleHit = false;
+#ifdef DEBUG_TRAVERSE_THREAD_ID
+    if (tid == DEBUG_TRAVERSE_THREAD_ID && !stackEmpty)
+      printf("LEAF: @%d +%d #%d t_n = %f, t_f = %f #=%d c.t = %f\n",
+             currentHeader->octant, currentHeader->offset,
+             currentFooter->leaf.size, tNear, tFar, numPrimitives, closest.t);
+#endif
     for (uint32_t i = 0; i < numPrimitives; ++i) {
       uint32_t triId = octree->getTriangleId(i + offset);
       if (intersectTriangle(ray, indices, vertices, triId, isect) &&
-          isect.t < closest.t) {
+          isect.t >= tNear && isect.t <= tFar && isect.t < closest.t) {
         updateClosest(isect, closest);
         triangleHit = true;
       }
+#ifdef DEBUG_TRAVERSE_THREAD_ID
+      if (tid == DEBUG_TRAVERSE_THREAD_ID)
+        printf("Test:triId=%d t=%f c.t = %f triangleHit = %d\n", triId, isect.t,
+               closest.t, triangleHit);
+#endif
+#ifdef DEBUG_TRAVERSE
       if (i > 32) {
-        bad = true;
         terminateRay = true;
         return false;
       }
+#endif
     }
     objectHit = triangleHit && closest.t >= tNear && closest.t <= tFar;
     terminateRay = objectHit || stackEmpty;
+#ifdef DEBUG_TRAVERSE
     ++outer_iters;
     if (outer_iters > 32) {
-      bad = true;
       terminateRay = true;
       return false;
     }
+#endif
   }
   return objectHit;
 }
@@ -510,8 +565,10 @@ __global__ void traceKernel(const Ray* rays, const int3* indices,
                             const int triCount, Hit* hits) {
   int rayIdx = threadIdx.x + blockIdx.x * blockDim.x;
   if (rayIdx < rayCount) {
-    Hit closest;
     Hit isect;
+    Hit closest;
+    isect.t = NPP_MAXABS_32F;
+    isect.triId = -1;
     closest.t = NPP_MAXABS_32F;
     closest.triId = -1;
     const Ray& ray = *(rays + rayIdx);
@@ -525,6 +582,7 @@ __global__ void traceKernel(const Ray* rays, const int3* indices,
       if (intersectTriangle(ray, indices, vertices, t, isect) &&
           isect.t < closest.t) {
         updateClosest(isect, closest);
+        printf("%d %f\n", rayIdx, isect.t);
       }
     }
 #endif
@@ -571,9 +629,9 @@ void CUDAOctreeRenderer::buildFromFile(Octree<LAYOUT_SOA>* d_octree) {
   Octree<LAYOUT_SOA> octreeFileSoa;
   octreeFileSoa.copy(octreeFileAos);
   octreeFileSoa.copyToGpu(d_octree);
-  //  Octree<LAYOUT_SOA> octreeFileSoaCheck;
-  //  octreeFileSoaCheck.copyFromGpu(d_octree);
-  //  LOG(DEBUG) << octreeFileSoaCheck << "\n";
+  Octree<LAYOUT_SOA> octreeFileSoaCheck;
+  octreeFileSoaCheck.copyFromGpu(d_octree);
+  LOG(DEBUG) << octreeFileSoaCheck << "\n";
 }
 
 void CUDAOctreeRenderer::build(Octree<LAYOUT_SOA>* d_octree) {
@@ -591,7 +649,6 @@ void CUDAOctreeRenderer::build(Octree<LAYOUT_SOA>* d_octree) {
 
 void CUDAOctreeRenderer::traceOnDevice(const int3* indices,
                                        const float3* vertices) {
-
   const int numThreadsPerBlock = 256;
   const int numBlocks =
       (rayBuffer.count() + numThreadsPerBlock - 1) / numThreadsPerBlock;
@@ -604,9 +661,9 @@ void CUDAOctreeRenderer::traceOnDevice(const int3* indices,
   build(d_octree);
 
   LOG(DEBUG) << "Ray tracing...\n";
-  traceKernel << <numBlocks, numThreadsPerBlock>>>
-      (rayBuffer.ptr(), indices, vertices, rayBuffer.count(), d_octree,
-       scene.numTriangles, hitBuffer.ptr());
+  traceKernel<<<numBlocks, numThreadsPerBlock>>>(
+      rayBuffer.ptr(), indices, vertices, rayBuffer.count(), d_octree,
+      scene.numTriangles, hitBuffer.ptr());
   cudaDeviceSynchronize();
   LOG(DEBUG) << "Done...\n";
   Octree<LAYOUT_SOA>::freeOnGpu(d_octree);

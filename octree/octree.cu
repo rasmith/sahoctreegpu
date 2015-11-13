@@ -38,9 +38,9 @@ __host__ bool Octree<LAYOUT_AOS>::buildFromFile(const char *fileName) {
   bool success = in.good();
   in.close();
   uint32_t testCount =
-      (m_nodeStorage.numNodes < 10 ? m_nodeStorage.numNodes : 10);
+      (m_nodeStorage.numNodes < 128 ? m_nodeStorage.numNodes : 128);
   for (uint32_t i = 0; i < testCount; ++i) {
-    LOG(DEBUG) << m_nodeStorage.nodes[i] << "\n";
+    LOG(DEBUG) << "["<<i<<"]"<<m_nodeStorage.nodes[i] << "\n";
     LOG(DEBUG) << "\n";
   }
   return success;
