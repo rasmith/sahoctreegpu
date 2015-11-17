@@ -1,0 +1,6 @@
+*.swp
+*.swo
+build*
+CMakeFiles/
+*.oct
+CMakeCache.txt

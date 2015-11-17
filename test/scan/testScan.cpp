@@ -1,4 +1,5 @@
 #include <iostream>
+#include <cstdlib>
 
 #define N 256
 

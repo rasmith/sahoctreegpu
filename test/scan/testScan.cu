@@ -17,9 +17,9 @@ static inline int nextPow2(int n)
 
 __global__ void incScanBlockWrapper(int* in, int* out, int size)
 {
-  __shared__ scratch[CUDA_BLOCK_SIZE];
+  __shared__ int scratch[CUDA_BLOCK_SIZE];
 
-  int incScanBlock(threadIdx.x, in[threadIdx.x], scratch, size);
+  out[threadIdx.x] = oct::incScanBlock(threadIdx.x, in[threadIdx.x], scratch, size);
 }
 
 void cudaInclusiveScan(int* in, int* out, int size)
