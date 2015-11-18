@@ -10,6 +10,7 @@
 //
 
 #include <nppdefs.h>
+#include <stdio.h>
 
 namespace oct
 {
@@ -18,9 +19,7 @@ __device__
 int incScanWarp(const int tid, const int data, volatile int* scratch,
                 const int warpSize=32, const int logWarpSize=5)
 {
-  const int lane = tid & (warpSize-1);
-  const int warp = tid>>logWarpSize;
-  int sid = warp<<(logWarpSize+1) + lane;
+  int sid = (tid<<1) - (tid & (warpSize - 1));
 
   scratch[sid] = 0;
   sid += warpSize;
@@ -30,6 +29,7 @@ int incScanWarp(const int tid, const int data, volatile int* scratch,
   {
     scratch[sid] += scratch[sid-i];
   }
+
   return scratch[sid];
 }
 
@@ -47,7 +47,7 @@ int incScanBlock(const int tid, const int data, volatile int* scratch,
 
     // intra warp segmented scan
     sum = incScanWarp(tid, data, scratch, warpSize, logWarpSize);
-    __syncthreads(); // TODO: is this needed?
+    // __syncthreads(); // TODO: is this needed?
 
     // collect the bases
     if (lane == lastLane)
@@ -72,7 +72,7 @@ int incScanBlock(const int tid, const int data, volatile int* scratch,
   {
     sum = incScanWarp(tid, data, scratch, warpSize, logWarpSize);
   }
-  __syncthreads();
+  // __syncthreads();
   return sum;
 }
 

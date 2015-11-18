@@ -31,10 +31,9 @@ include_directories(${OCTREE_SOURCE_DIR})
 
 cuda_add_executable(
   testScan
-  ${OCTREE_SOURCE_DIR}/octreeScan.h
-  ${OCTREE_SOURCE_DIR}/octreeScan.cu
+  #${OCTREE_SOURCE_DIR}/octreeScan.h
+  #${OCTREE_SOURCE_DIR}/octreeScan.cu
   testScan.cu
-  testScan.cpp
 )
 
 target_link_libraries(testScan optix_prime)
