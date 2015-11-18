@@ -131,6 +131,51 @@ void cpuInclusiveScan(int* in, int* out, int size)
     out[i] = out[i-1] + in[i];
 }
 
+void simpleTest0()
+{
+  int data[4] =  {1,1,1,1};
+  int result[4] = {0,0,0,0}; 
+  int expected[4] = {1,2,3,4};
+  
+  // test block-wise inclusive scan (incScanBlock)
+  cudaInclusiveScan(data, result, 4);
+
+  // compare result
+  for (int i=0; i<4; ++i)
+  {
+    std::cout<<result[i]<<",";
+    if(result[i] != expected[i])
+    {
+      std::cerr<<"mismatch error @ [" << i <<"]: result = "<< result[i] <<", expected = "<<expected[i]<<"\n";
+      exit(1);
+    }
+  }
+  std::cout<<"\nsimple test 0 successful!"<<std::endl;
+}
+
+void simpleTest1()
+{
+  int data[4] =  {1,2,3,4};
+  int result[4] = {0,0,0,0}; 
+  int expected[4] = {1,3,6,10};
+  
+  // test block-wise inclusive scan (incScanBlock)
+  cudaInclusiveScan(data, result, 4);
+
+  // compare result
+  for (int i=0; i<4; ++i)
+  {
+    std::cout<<result[i]<<",";
+    if(result[i] != expected[i])
+    {
+      std::cerr<<"mismatch error @ [" << i <<"]: result = "<< result[i] <<", expected = "<<expected[i]<<"\n";
+      exit(1);
+    }
+  }
+  std::cout<<"\nsimple test 1 successful!"<<std::endl;
+}
+
+
 void test(int* data, int* result, int* expected)
 {
   // make reference values
@@ -158,6 +203,9 @@ int main()
   int* result = new int[N];
   int* expected = new int[N];
 
+  simpleTest0();
+  simpleTest1();
+
   // populate data
   for(int i=0; i<N; ++i)
     data[i] = 1;
@@ -169,7 +217,7 @@ int main()
   srand(time(NULL));
   for(int i=0; i<N; ++i)
     data[i] = rand() < RAND_MAX/2;
-    
+
   test(data, result, expected);
 
   std::cout<<"\ntest 1 (random) successful!"<<std::endl;
