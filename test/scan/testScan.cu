@@ -131,17 +131,8 @@ void cpuInclusiveScan(int* in, int* out, int size)
     out[i] = out[i-1] + in[i];
 }
 
-int main()
+void test(int* data, int* result, int* expected)
 {
-  // allocate space
-  int* data = new int[N];
-  int* result = new int[N];
-  int* expected = new int[N];
-
-  // populate data
-  for(int i=0; i<N; ++i)
-    data[i] = 1;
-
   // make reference values
   cpuInclusiveScan(data, expected, N);
 
@@ -158,7 +149,30 @@ int main()
       exit(1);
     }
   }
-  std::cout<<"\ntest successful!"<<std::endl;
+}
+
+int main()
+{
+  // allocate space
+  int* data = new int[N];
+  int* result = new int[N];
+  int* expected = new int[N];
+
+  // populate data
+  for(int i=0; i<N; ++i)
+    data[i] = 1;
+
+  test(data, result, expected);
+
+  std::cout<<"\ntest 0 (all 1's) successful!"<<std::endl;
+
+  srand(time(NULL));
+  for(int i=0; i<N; ++i)
+    data[i] = rand() < RAND_MAX/2;
+    
+  test(data, result, expected);
+
+  std::cout<<"\ntest 1 (random) successful!"<<std::endl;
 
   delete [] data; 
   delete [] result; 
