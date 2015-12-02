@@ -374,10 +374,11 @@ inline __device__ __host__ void getChildren(
   *hasChildBitmask = maskResult;
 }
 
-//#define DEBUG_TRAVERSE
+#define DEBUG_TRAVERSE
 #ifdef DEBUG_TRAVERSE
 //#define DEBUG_TRAVERSE_THREAD_ID 389308
-#define DEBUG_TRAVERSE_THREAD_ID 386858  // t = 0.485482
+#define DEBUG_TRAVERSE_THREAD_ID 0
+//#define DEBUG_TRAVERSE_THREAD_ID 386858  // t = 0.485482
 #endif
 inline __device__ __host__ bool intersectOctree(
     const Ray& ray, const int3* indices, const float3* vertices,
@@ -645,6 +646,7 @@ void CUDAOctreeRenderer::buildOnDevice(Octree<LAYOUT_SOA>* d_octree) {}
 
 void CUDAOctreeRenderer::buildFromFile(Octree<LAYOUT_SOA>* d_octree) {
   Octree<LAYOUT_AOS> octreeFileAos;
+  LOG(DEBUG) << "Building from: " << buildOptions.info << "\n";
   octreeFileAos.buildFromFile(buildOptions.info);
   octreeFileAos.setGeometry(scene.vertices, scene.indices, scene.numTriangles,
                             scene.numVertices);
@@ -671,12 +673,14 @@ void CUDAOctreeRenderer::build(Octree<LAYOUT_SOA>* d_octree) {
 
 void CUDAOctreeRenderer::traceOnDevice(const int3* indices,
                                        const float3* vertices) {
+  // TODO (rsmith0x0): make this configurable.
   const int numThreadsPerBlock = 256;
   const int numBlocks =
       (rayBuffer.count() + numThreadsPerBlock - 1) / numThreadsPerBlock;
   LOG(DEBUG) << "numThreadsPerBlock = " << numThreadsPerBlock
              << " numBlocks = " << numBlocks << "\n";
 
+  // TODO (rsmith0x0): make this configurable.
   int validDeviceIds[2] = {1, 2};
   int device = -1;
   CHK_CUDA(cudaSetValidDevices(validDeviceIds, 2));

@@ -69,7 +69,7 @@ int main(int argc, char** argv) {
   RendererType rtype = CPU_RTP_SIMPLE;
   char buildInputFile[2048];
   bool haveBuildInputFile = false;
-  buildOptions.type = BuildOptions::BUILD_ON_DEVICE;
+  buildOptions.type = BuildOptions::BUILD_FROM_FILE;
   buildOptions.info = NULL;
 
   // parse arguments
@@ -136,13 +136,18 @@ int main(int argc, char** argv) {
   } else if (rtype == GPU_CUDA_SIMPLE) {
     renderer = new CUDASimpleRenderer(config);
   } else if (rtype == GPU_CUDA_OCTREE) {
-    std::cout << "Running CUDAOctreeRenderer.\n";
+    std::cout << "Using CUDAOctreeRenderer.\n";
     renderer = new CUDAOctreeRenderer(config, buildOptions);
   } else {
     renderer = new RTPSimpleRenderer(config);
   }
+  std::cout << "Rendering...\n";
   renderer->render();
+  std::cout << "Shading...\n";
   renderer->shade();
+  std::cout << "Writing output...\n";
   renderer->write();
+  std::cout << "Cleaning up...\n";
   if (renderer) delete renderer;
+  std::cout << "Done!\n";
 }

@@ -1,9 +1,9 @@
 #include "renderer.h"
 #include "sceneLoader.h"
 #include "define.h"
+#include "log.h"
 
 Renderer::Renderer(const ConfigLoader& config) {
-
   image.filename = config.imageFilename;
   image.width = config.imageWidth;
 
@@ -34,7 +34,7 @@ Renderer::Renderer(const ConfigLoader& config) {
 Renderer::~Renderer() { CHK_PRIME(rtpContextDestroy(context)); }
 
 void Renderer::shade() {
-
+  std::cout << "Shade:resize image\n";
   image.resize();
 
   float3 backgroundColor = {0.2f, 0.2f, 0.2f};
@@ -43,15 +43,22 @@ void Renderer::shade() {
   Hit* hits = hitBuffer.ptr();
   if (hitBuffer.type() == RTP_BUFFER_TYPE_CUDA_LINEAR) {
     hitsTemp.resize(hitBuffer.count());
+    std::cout << "Shade:copy hits\n";
     CHK_CUDA(cudaMemcpy(&hitsTemp[0], hitBuffer.ptr(), hitBuffer.sizeInBytes(),
                         cudaMemcpyDeviceToHost));
     hits = &hitsTemp[0];
   }
 
+  std::cout << "Shade:shade hits\n";
+  std::cout << "Shade:hitBuffer.count = " << hitBuffer.count() << "\n";
+  std::cout << "tris =";
   for (size_t i = 0; i < hitBuffer.count(); i++) {
     if (hits[i].triId < 0) {
       image.pixel[i] = backgroundColor;
     } else {
+      if (hits[i].triId > scene.numTriangles)
+        std::cout << "Shade: hit " << i << " has out of bound index "
+                  << hits[i].triId << "\n";
       const int3 tri = scene.indices[hits[i].triId];
       const float3 v0 = scene.vertices[tri.x];
       const float3 v1 = scene.vertices[tri.y];
@@ -63,5 +70,5 @@ void Renderer::shade() {
       image.pixel[i] = 0.5f * n + make_float3(0.5f, 0.5f, 0.5f);
     }
   }
+  std::cout << "\nShade:finished\n";
 }
-
