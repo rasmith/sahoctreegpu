@@ -2,6 +2,7 @@
 
 #include <nppdefs.h>
 #include <float.h>
+#include <sys/time.h>
 
 #include "log.h"
 #include "octree.h"
@@ -9,6 +10,27 @@
 #define kEpsilon 1e-18
 
 namespace oct {
+
+struct timespec getRealTime() {
+  struct timespec ts;
+#ifdef __FreeBSD__
+  clock_gettime(CLOCK_MONOTONIC, &ts);  // Works on FreeBSD
+#else
+  clock_gettime(CLOCK_REALTIME, &ts);
+#endif
+  return ts;
+}
+
+double getTimeDiffMs(const struct timespec& start, const struct timespec& end) {
+  // start: X s, A ns
+  // end:   Y s, B ns
+  // (Y - (X + 1)) * 1000000.0 + B / 1000.0 + 1000000.0 - A / 1000.0
+  // = (Y - X) * 1000000.0 - 1000000.0 + B / 1000.0 + 1000000.0 - A / 1000.0
+  // = (Y - X) * 1000000.0 + B / 1000.0 - A / 1000.0
+  double microsecond_diff = 1000000.0 * (end.tv_sec - start.tv_sec) +
+                            end.tv_nsec / 1000.0 - start.tv_nsec / 1000.0;
+  return microsecond_diff;
+}
 
 inline __device__ __host__ Aabb getChildBounds(const Aabb& bounds,
                                                const float3& center,
@@ -655,17 +677,29 @@ void CUDAOctreeRenderer::traceOnDevice(const int3* indices,
   LOG(DEBUG) << "numThreadsPerBlock = " << numThreadsPerBlock
              << " numBlocks = " << numBlocks << "\n";
 
+  int validDeviceIds[2] = {1, 2};
+  int device = -1;
+  CHK_CUDA(cudaSetValidDevices(validDeviceIds, 2));
+  CHK_CUDA(cudaGetDevice(&device));
+  LOG(DEBUG) << "Device = " << device << "\n";
   Octree<LAYOUT_SOA>* d_octree = NULL;
   CHK_CUDA(cudaMalloc((void**)(&d_octree), sizeof(Octree<LAYOUT_SOA>)));
 
   build(d_octree);
 
   LOG(DEBUG) << "Ray tracing...\n";
+  struct timespec start = getRealTime();
   traceKernel<<<numBlocks, numThreadsPerBlock>>>(
       rayBuffer.ptr(), indices, vertices, rayBuffer.count(), d_octree,
       scene.numTriangles, hitBuffer.ptr());
   cudaDeviceSynchronize();
+  struct timespec end = getRealTime();
+  double elapsed_microseconds = getTimeDiffMs(start, end);
   LOG(DEBUG) << "Done...\n";
+  LOG(DEBUG) << "Start: " << start.tv_sec << " sec "
+    << start.tv_nsec << " nsec, End: " << end.tv_sec << " sec "
+    << end.tv_nsec << " nsec.\n";
+  LOG(DEBUG) << "Elapsed time = " << elapsed_microseconds << " microsec\n";
   Octree<LAYOUT_SOA>::freeOnGpu(d_octree);
   CHK_CUDA(cudaFree((void*)(d_octree)));
 }
