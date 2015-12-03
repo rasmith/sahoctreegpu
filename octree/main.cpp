@@ -83,7 +83,7 @@ int main(int argc, char** argv) {
   RendererType rtype = CPU_RTP_SIMPLE;
   char buildInputFile[2048];
   bool haveBuildInputFile = false;
-  buildOptions.type = BuildOptions::BUILD_FROM_FILE;
+  buildOptions.type = BuildOptions::BUILD_ON_DEVICE;
   buildOptions.info = NULL;
 
   // parse arguments
