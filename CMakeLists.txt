@@ -85,7 +85,6 @@ cmake_minimum_required(VERSION 2.8.8 FATAL_ERROR)
 # adding backwards compatibility one feature at a time.  We will just specify
 # that all policies will use version 2.6 symantics.
 cmake_policy(VERSION 2.6)
-cmake_policy(SET CMP0054 OLD)
 
 # Add paths to our CMake code to the module path, so they can be found automatically by
 # CMake.
