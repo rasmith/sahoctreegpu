@@ -63,6 +63,20 @@ enum RendererType {
   GPU_CUDA_OCTREE
 };
 
+void setupDevice(int* preferred) {
+  int choices[8] = {0, 1, 2, 3, 4, 5, 6, 7};
+  int count = 0;
+  CHK_CUDA(cudaGetDeviceCount(&count));
+  if (preferred == NULL || *preferred < 0 || *preferred >= count ||
+      cudaSetDevice(*preferred) != cudaSuccess) {
+    CHK_CUDA(cudaGetDeviceCount(&count));
+    CHK_CUDA(cudaSetValidDevices(choices, count));
+  }
+  int device = -1;
+  CHK_CUDA(cudaGetDevice(&device));
+  *preferred = device;
+}
+
 int main(int argc, char** argv) {
   ConfigLoader config;
   BuildOptions buildOptions;
@@ -120,12 +134,19 @@ int main(int argc, char** argv) {
     }
   }
 
+  if (rtype == GPU_CUDA_OCTREE || rtype == GPU_CUDA_SIMPLE) {
+    int device = 1;
+    setupDevice(&device);
+    std::cout << "Device = " << device << "\n";
+  }
+
   if (!foundObj) {
     std::cerr << ".obj file not found\n";
     printUsageAndExit(argv[0]);
   }
 
-  if (buildOptions.type == BuildOptions::BUILD_FROM_FILE && !haveBuildInputFile) {
+  if (buildOptions.type == BuildOptions::BUILD_FROM_FILE &&
+      !haveBuildInputFile) {
     std::cerr << "Building from file specified but no input file given!\n";
     printUsageAndExit(argv[0]);
   }

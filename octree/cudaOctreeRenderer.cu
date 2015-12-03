@@ -629,11 +629,13 @@ void CUDAOctreeRenderer::render() {
   CHK_CUDA(
       cudaMalloc((void**)&d_vertices, scene.numTriangles * sizeof(float3)));
 
+  LOG(DEBUG) << "numTriangles = " << scene.numTriangles << " " <<
+    " numVertices = " << scene.numVertices << "\n";
   CHK_CUDA(cudaMemcpy(d_indices, scene.indices,
                       scene.numTriangles * sizeof(int3),
                       cudaMemcpyHostToDevice));
   CHK_CUDA(cudaMemcpy(d_vertices, scene.vertices,
-                      scene.numTriangles * sizeof(float3),
+                      scene.numVertices * sizeof(float3),
                       cudaMemcpyHostToDevice));
 
   traceOnDevice(d_indices, d_vertices);
@@ -680,12 +682,6 @@ void CUDAOctreeRenderer::traceOnDevice(const int3* indices,
   LOG(DEBUG) << "numThreadsPerBlock = " << numThreadsPerBlock
              << " numBlocks = " << numBlocks << "\n";
 
-  // TODO (rsmith0x0): make this configurable.
-  int validDeviceIds[2] = {1, 2};
-  int device = -1;
-  CHK_CUDA(cudaSetValidDevices(validDeviceIds, 2));
-  CHK_CUDA(cudaGetDevice(&device));
-  LOG(DEBUG) << "Device = " << device << "\n";
   Octree<LAYOUT_SOA>* d_octree = NULL;
   CHK_CUDA(cudaMalloc((void**)(&d_octree), sizeof(Octree<LAYOUT_SOA>)));
 
