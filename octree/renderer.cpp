@@ -3,6 +3,7 @@
 #include "define.h"
 
 Renderer::Renderer(const ConfigLoader& config) {
+
   image.filename = config.imageFilename;
   image.width = config.imageWidth;
 
@@ -33,6 +34,7 @@ Renderer::Renderer(const ConfigLoader& config) {
 Renderer::~Renderer() { CHK_PRIME(rtpContextDestroy(context)); }
 
 void Renderer::shade() {
+
   image.resize();
 
   float3 backgroundColor = {0.2f, 0.2f, 0.2f};
