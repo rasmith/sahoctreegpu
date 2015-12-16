@@ -37,10 +37,12 @@ __host__ bool Octree<LAYOUT_AOS>::buildFromFile(const char *fileName) {
           sizeof(uint32_t) * m_numTriangleReferences);
   bool success = in.good();
   in.close();
+  const uint32_t kNumTestNodes = 8;
   uint32_t testCount =
-      (m_nodeStorage.numNodes < 128 ? m_nodeStorage.numNodes : 128);
+      (m_nodeStorage.numNodes < kNumTestNodes ? m_nodeStorage.numNodes
+                                              : kNumTestNodes);
   for (uint32_t i = 0; i < testCount; ++i) {
-    LOG(DEBUG) << "["<<i<<"]"<<m_nodeStorage.nodes[i] << "\n";
+    LOG(DEBUG) << "[" << i << "]" << m_nodeStorage.nodes[i] << "\n";
     LOG(DEBUG) << "\n";
   }
   return success;

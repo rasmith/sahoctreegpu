@@ -52,6 +52,12 @@ void Renderer::shade() {
     if (hits[i].triId < 0) {
       image.pixel[i] = backgroundColor;
     } else {
+      if (hits[i].triId > scene.numTriangles)  {
+#if 0
+        std::cout << " Got out of bounds triangle ID: " << hits[i].triId << "\n";
+#endif
+        continue;
+      }
       const int3 tri = scene.indices[hits[i].triId];
       const float3 v0 = scene.vertices[tri.x];
       const float3 v1 = scene.vertices[tri.y];

@@ -9,6 +9,16 @@
 
 #define kEpsilon 1e-18
 
+#define HIT_SIZE sizeof(Hit)
+#define RAY_SIZE sizeof(Ray)
+#define THREADS_PER_BLOCK 128
+#define REGISTERS_PER_SM (1 << 15)
+#define SHARED_MEMORY_PER_SM (1 << 15)
+#define MAX_REGISTERS_THREAD 63
+#define MIN_BLOCKS \
+  ((REGISTERS_PER_SM) / (THREADS_PER_BLOCK * MAX_REGISTERS_THREAD))
+#define MAX_SHARED_MEMORY_PER_BLOCK SHARED_MEMORY_PER_SM / MIN_BLOCKS
+
 namespace oct {
 
 struct timespec getRealTime() {
@@ -19,6 +29,16 @@ struct timespec getRealTime() {
   clock_gettime(CLOCK_REALTIME, &ts);
 #endif
   return ts;
+}
+
+template <typename T>
+inline __device__ __host__ const T* RunTimeSelect(bool condition,
+                                                  const T* trueResult,
+                                                  const T* falseResult) {
+  const uintptr_t c = condition;
+  return reinterpret_cast<const T*>(
+      ((reinterpret_cast<uintptr_t>(trueResult) & c) |
+       (reinterpret_cast<uintptr_t>(falseResult) & ~c)));
 }
 
 double getTimeDiffMs(const struct timespec& start, const struct timespec& end) {
@@ -32,25 +52,43 @@ double getTimeDiffMs(const struct timespec& start, const struct timespec& end) {
   return microsecond_diff;
 }
 
+#define DIVERGENCE_FREE_CHILD_BOUNDS
 inline __device__ __host__ Aabb getChildBounds(const Aabb& bounds,
                                                const float3& center,
                                                uint32_t octant) {
   Aabb result;
   float3 min = bounds[0];
   float3 max = bounds[1];
+#ifdef DIVERGENCE_FREE_CHILD_BOUNDS
+  const float3* min_center[2] = {&min, &center};
+  const float3* center_max[2] = {&center, &max};
+#endif
+
+#ifdef DIVERGENCE_FREE_CHILD_BOUNDS
+  uint32_t xBit = (octant >> 0) & 0x1;
+  uint32_t yBit = (octant >> 1) & 0x1;
+  uint32_t zBit = (octant >> 2) & 0x1;
+  min.x = min_center[xBit]->x;
+  max.x = center_max[xBit]->x;
+  min.y = min_center[yBit]->y;
+  max.y = center_max[yBit]->y;
+  min.z = min_center[zBit]->z;
+  max.z = center_max[zBit]->z;
+#else
   min.x = ((octant & (0x1 << 0)) > 0 ? center.x : min.x);
   max.x = ((octant & (0x1 << 0)) > 0 ? max.x : center.x);
   min.y = ((octant & (0x1 << 1)) > 0 ? center.y : min.y);
   max.y = ((octant & (0x1 << 1)) > 0 ? max.y : center.y);
   min.z = ((octant & (0x1 << 2)) > 0 ? center.z : min.z);
   max.z = ((octant & (0x1 << 2)) > 0 ? max.z : center.z);
+#endif
   result[0] = min;
   result[1] = max;
   return result;
 }
 
 inline __device__ __host__ bool isValidT(float t, float t_near, float t_far) {
-  return !isnan(t) && t < t_far && t >= t_near;
+  return !isnan(t) & t < t_far & t >= t_near;
 }
 
 template <typename T>
@@ -123,31 +161,54 @@ inline __device__ __host__ void updateHitBuffer(const Hit& closest,
   hitBuf->v = closest.v;
 }
 
+#define DIVERGENCE_FREE_INSTERSECT_AABB
 inline __device__ __host__ bool intersectAabb(const float3& origin,
                                               const float3& invDirection,
                                               const Aabb& bounds, float t0,
                                               float t1, float* tNear,
                                               float* tFar) {
   int s[3] = {invDirection.x < 0, invDirection.y < 0, invDirection.z < 0};
+#ifdef DIVERGENCE_FREE_INSTERSECT_AABB
+  float tN = (bounds[s[0]].x - origin.x) * invDirection.x;
+  float tF = (bounds[1 - s[0]].x - origin.x) * invDirection.x;
+#else
   *tNear = (bounds[s[0]].x - origin.x) * invDirection.x;
   *tFar = (bounds[1 - s[0]].x - origin.x) * invDirection.x;
+#endif
   float tymin = (bounds[s[1]].y - origin.y) * invDirection.y;
   float tymax = (bounds[1 - s[1]].y - origin.y) * invDirection.y;
 
+#ifdef DIVERGENCE_FREE_INSTERSECT_AABB
+  tN = max(tN, tymin);
+  tF = min(tF, tymax);
+#else
   if (*tNear > tymax || tymin > *tFar) return false;
   if (tymin > *tNear) *tNear = tymin;
   if (tymax < *tFar) *tFar = tymax;
+#endif
 
   float tzmin = (bounds[s[2]].z - origin.z) * invDirection.z;
   float tzmax = (bounds[1 - s[2]].z - origin.z) * invDirection.z;
 
+#ifdef DIVERGENCE_FREE_INSTERSECT_AABB
+  tN = max(tN, tzmin);
+  tF = min(tF, tzmax);
+#else
   if (*tNear > tzmax || tzmin > *tFar) return false;
   if (tzmin > *tNear) *tNear = tzmin;
   if (tzmax < *tFar) *tFar = tzmax;
+#endif
 
+#ifdef DIVERGENCE_FREE_INSTERSECT_AABB
+  *tNear = tN;
+  *tFar = tF;
+  return !(tN > tF);
+#else
   return *tNear<t1&& * tFar> t0;
+#endif
 }
 
+#define DIVERGENCE_FREE_INSTERSECT_TRIANGLE
 inline __device__ __host__ bool intersectTriangle(const Ray& ray,
                                                   const int3* indices,
                                                   const float3* vertices,
@@ -160,23 +221,34 @@ inline __device__ __host__ bool intersectTriangle(const Ray& ray,
   const float3 e2 = c - a;
   const float3 pVec = cross(ray.dir, e2);
   float det = dot(e1, pVec);
+#ifndef DIVERGENCE_FREE_INSTERSECT_TRIANGLE
   if (det > -kEpsilon && det < kEpsilon) return false;
+#endif
   float invDet = 1.0f / det;
   float3 tVec = ray.origin - a;
   float3 qVec = cross(tVec, e1);
   float t = dot(e2, qVec) * invDet;
-  // Do not allow ray origin in front of triangle
+// Do not allow ray origin in front of triangle
+#ifndef DIVERGENCE_FREE_INSTERSECT_TRIANGLE
   if (t < 0.0f) return false;
+#endif
   float u = dot(tVec, pVec) * invDet;
+#ifndef DIVERGENCE_FREE_INSTERSECT_TRIANGLE
   if (u < 0.0f || u > 1.0f) return false;
+#endif
   float v = dot(ray.dir, qVec) * invDet;
+#ifndef DIVERGENCE_FREE_INSTERSECT_TRIANGLE
   if (v < 0.0f || u + v > 1.0f) return false;
-
+#endif
   isect.t = t;
   isect.triId = triId;
   isect.u = u;
   isect.v = v;
+#ifdef DIVERGENCE_FREE_INSTERSECT_TRIANGLE
+  return t >= 0.0f & u >= 0.0f & u <= 1.0f & v >= 0.0f & ((u + v) <= 1.0f);
+#else
   return true;
+#endif
 }
 
 inline __host__ __device__ __host__ void createEvents(
@@ -332,11 +404,11 @@ inline __host__ __device__ __host__ void createEvents(
   bool isY = events[1].type == OCTREE_EVENT_Y;
   bool isZ = events[1].type == OCTREE_EVENT_Z;
   unsigned char xMask =
-      *N > 2 && entryEqualsFirst && isX && (xBit || (direction.x < 0.0f));
+      *N > 2 & entryEqualsFirst & isX & (xBit | (direction.x < 0.0f));
   unsigned char yMask =
-      *N > 2 && entryEqualsFirst && isY && (yBit || (direction.y < 0.0f));
+      *N > 2 & entryEqualsFirst & isY & (yBit | (direction.y < 0.0f));
   unsigned char zMask =
-      *N > 2 && entryEqualsFirst && isZ && (zBit || (direction.z < 0.0f));
+      *N > 2 & entryEqualsFirst & isZ & (zBit | (direction.z < 0.0f));
   unsigned char mask = xMask | (yMask << 1) | (zMask << 2);
   events[0].mask = events[0].mask ^ mask;
 }
@@ -374,7 +446,7 @@ inline __device__ __host__ void getChildren(
   *hasChildBitmask = maskResult;
 }
 
-#define DEBUG_TRAVERSE
+//#define DEBUG_TRAVERSE
 #ifdef DEBUG_TRAVERSE
 //#define DEBUG_TRAVERSE_THREAD_ID 389308
 #define DEBUG_TRAVERSE_THREAD_ID 0
@@ -383,7 +455,7 @@ inline __device__ __host__ void getChildren(
 inline __device__ __host__ bool intersectOctree(
     const Ray& ray, const int3* indices, const float3* vertices,
     const Octree<LAYOUT_SOA>* octree, Hit& closest) {
-  const uint32_t kMaxDepth = 20;
+  const uint32_t kMaxDepth = 10;
   const uint32_t kMaxEvents = 4;
   const uint32_t kStackSize = kMaxEvents * kMaxDepth;
 
@@ -499,12 +571,13 @@ inline __device__ __host__ bool intersectOctree(
       // the child that was hit first gets popped first.
       int k = -1;  // keep track of which valid event we have
       octant = 0x0;
-      for (uint32_t i = 0; i < numEvents - 1 && k + 1 < numValidEvents; ++i) {
+      for (uint32_t i = 0; (i < numEvents - 1) & ((k + 1) < numValidEvents);
+           ++i) {
         octant = octant ^ events[i].mask;
         bool hasChild = ((octantBits & (0x1 << octant)) != 0);
         k += hasChild;
         int nextStack = stackEnd + numValidEvents - k - 1;
-        if (hasChild) {
+        if (hasChild) {  // divergence
 #ifdef DEBUG_TRAVERSE_THREAD_ID
           if (tid == DEBUG_TRAVERSE_THREAD_ID)
             printf("children[%d] = %d\n", octant, children[octant]);
@@ -514,10 +587,12 @@ inline __device__ __host__ bool intersectOctree(
           tNearStack[nextStack] = events[i].t;
           tFarStack[nextStack] = events[i + 1].t;
         }
+#ifdef DEBUG_TRAVERSE
         if (i > 5) {
           terminateRay = true;
           return false;
         }
+#endif
       }
       stackEnd += numValidEvents;
 #ifdef DEBUG_TRAVERSE
@@ -536,12 +611,26 @@ inline __device__ __host__ bool intersectOctree(
       }
 #endif
     }
+#define DIVERGENCE_FREE_FETCH
+#ifdef DIVERGENCE_FREE_FETCH
+    OctNodeHeader dummy_header;
+    OctNodeFooter<uint64_t> dummy_footer;
+    currentHeader =
+        RunTimeSelect(stackEmpty, &dummy_header, &headers[currentId]);
+    currentFooter =
+        RunTimeSelect(stackEmpty, &dummy_footer, &footers[currentId]);
+    uint32_t numPrimitives = !stackEmpty * currentFooter->leaf.size;
+    uint32_t offset = !stackEmpty * currentHeader->offset;
+    tNear = !stackEmpty * tNearStack[!stackEmpty * stackEnd];
+    tFar = !stackEmpty * tFarStack[!stackEmpty * stackEnd];
+#else
     currentHeader = (stackEmpty ? NULL : &headers[currentId]);
     currentFooter = (stackEmpty ? NULL : &footers[currentId]);
     uint32_t numPrimitives = (stackEmpty ? 0 : currentFooter->leaf.size);
     uint32_t offset = (stackEmpty ? 0 : currentHeader->offset);
     tNear = (stackEmpty ? 0.0f : tNearStack[stackEnd]);
     tFar = (stackEmpty ? 0.0f : tFarStack[stackEnd]);
+#endif
     triangleHit = false;
 #ifdef DEBUG_TRAVERSE_THREAD_ID
     if (tid == DEBUG_TRAVERSE_THREAD_ID && !stackEmpty)
@@ -551,8 +640,8 @@ inline __device__ __host__ bool intersectOctree(
 #endif
     for (uint32_t i = 0; i < numPrimitives; ++i) {
       uint32_t triId = octree->getTriangleId(i + offset);
-      if (intersectTriangle(ray, indices, vertices, triId, isect) &&
-          isect.t >= tNear && isect.t <= tFar && isect.t < closest.t) {
+      if (intersectTriangle(ray, indices, vertices, triId, isect) &
+          isect.t >= tNear & isect.t <= tFar & isect.t < closest.t) {
         updateClosest(isect, closest);
         triangleHit = true;
       }
@@ -568,8 +657,8 @@ inline __device__ __host__ bool intersectOctree(
       }
 #endif
     }
-    objectHit = triangleHit && closest.t >= tNear && closest.t <= tFar;
-    terminateRay = objectHit || stackEmpty;
+    objectHit = triangleHit & (closest.t >= tNear) & (closest.t <= tFar);
+    terminateRay = objectHit | stackEmpty;
 #ifdef DEBUG_TRAVERSE
     ++outer_iters;
     if (outer_iters > 32) {
@@ -582,10 +671,10 @@ inline __device__ __host__ bool intersectOctree(
 }
 
 #define USE_OCTREE
-__global__ void traceKernel(const Ray* rays, const int3* indices,
-                            const float3* vertices, const int rayCount,
-                            const Octree<LAYOUT_SOA>* octree,
-                            const int triCount, Hit* hits) {
+__global__ __launch_bounds__(THREADS_PER_BLOCK, MIN_BLOCKS) void traceKernel(
+    const Ray* rays, const int3* indices, const float3* vertices,
+    const int rayCount, const Octree<LAYOUT_SOA>* octree, const int triCount,
+    Hit* hits) {
   int rayIdx = threadIdx.x + blockIdx.x * blockDim.x;
   if (rayIdx < rayCount) {
     Hit isect;
@@ -596,12 +685,12 @@ __global__ void traceKernel(const Ray* rays, const int3* indices,
     closest.triId = -1;
     const Ray& ray = *(rays + rayIdx);
 #ifdef USE_OCTREE
-    if (intersectOctree(ray, indices, vertices, octree, isect) &&
+    if (intersectOctree(ray, indices, vertices, octree, isect) &
         isect.t < closest.t) {
       updateClosest(isect, closest);
     }
 #else
-    for (int t = 0; t < triCount; ++t) {  // triangles
+    for (int t = 0; t < triCount; ++t) {                         // triangles
       if (intersectTriangle(ray, indices, vertices, t, isect) &&
           isect.t < closest.t) {
         updateClosest(isect, closest);
@@ -629,8 +718,8 @@ void CUDAOctreeRenderer::render() {
   CHK_CUDA(
       cudaMalloc((void**)&d_vertices, scene.numTriangles * sizeof(float3)));
 
-  LOG(DEBUG) << "numTriangles = " << scene.numTriangles << " " <<
-    " numVertices = " << scene.numVertices << "\n";
+  LOG(DEBUG) << "numTriangles = " << scene.numTriangles << " "
+             << " numVertices = " << scene.numVertices << "\n";
   CHK_CUDA(cudaMemcpy(d_indices, scene.indices,
                       scene.numTriangles * sizeof(int3),
                       cudaMemcpyHostToDevice));
@@ -646,6 +735,7 @@ void CUDAOctreeRenderer::render() {
 
 void CUDAOctreeRenderer::buildOnDevice(Octree<LAYOUT_SOA>* d_octree) {}
 
+//#define DEBUG_CHECK_FILE_OCTREE
 void CUDAOctreeRenderer::buildFromFile(Octree<LAYOUT_SOA>* d_octree) {
   Octree<LAYOUT_AOS> octreeFileAos;
   LOG(DEBUG) << "Building from: " << buildOptions.info << "\n";
@@ -655,9 +745,11 @@ void CUDAOctreeRenderer::buildFromFile(Octree<LAYOUT_SOA>* d_octree) {
   Octree<LAYOUT_SOA> octreeFileSoa;
   octreeFileSoa.copy(octreeFileAos);
   octreeFileSoa.copyToGpu(d_octree);
+#ifdef DEBUG_CHECK_FILE_OCTREE
   Octree<LAYOUT_SOA> octreeFileSoaCheck;
   octreeFileSoaCheck.copyFromGpu(d_octree);
   LOG(DEBUG) << octreeFileSoaCheck << "\n";
+#endif
 }
 
 void CUDAOctreeRenderer::build(Octree<LAYOUT_SOA>* d_octree) {
@@ -676,7 +768,7 @@ void CUDAOctreeRenderer::build(Octree<LAYOUT_SOA>* d_octree) {
 void CUDAOctreeRenderer::traceOnDevice(const int3* indices,
                                        const float3* vertices) {
   // TODO (rsmith0x0): make this configurable.
-  const int numThreadsPerBlock = 256;
+  const int numThreadsPerBlock = THREADS_PER_BLOCK;
   const int numBlocks =
       (rayBuffer.count() + numThreadsPerBlock - 1) / numThreadsPerBlock;
   LOG(DEBUG) << "numThreadsPerBlock = " << numThreadsPerBlock
@@ -696,10 +788,16 @@ void CUDAOctreeRenderer::traceOnDevice(const int3* indices,
   struct timespec end = getRealTime();
   double elapsed_microseconds = getTimeDiffMs(start, end);
   LOG(DEBUG) << "Done...\n";
-  LOG(DEBUG) << "Start: " << start.tv_sec << " sec "
-    << start.tv_nsec << " nsec, End: " << end.tv_sec << " sec "
-    << end.tv_nsec << " nsec.\n";
-  LOG(DEBUG) << "Elapsed time = " << elapsed_microseconds << " microsec\n";
+  LOG(DEBUG) << "Start: " << start.tv_sec << " sec " << start.tv_nsec
+             << " nsec, End: " << end.tv_sec << " sec " << end.tv_nsec
+             << " nsec.\n";
+  LOG(DEBUG) << "Elapsed time = " << elapsed_microseconds << " microsec "
+             << "," << elapsed_microseconds / 1000.0 << " millisec\n";
+  float ns_per_ray = 1000.0 * elapsed_microseconds / rayBuffer.count();
+  LOG(DEBUG) << "Traced " << rayBuffer.count() << " rays at " << ns_per_ray
+             << " nanoseconds per ray\n";
+  float mrays_sec = rayBuffer.count() / elapsed_microseconds;
+  LOG(DEBUG) << "Rate is " << mrays_sec << " million rays per second.\n";
   Octree<LAYOUT_SOA>::freeOnGpu(d_octree);
   CHK_CUDA(cudaFree((void*)(d_octree)));
 }

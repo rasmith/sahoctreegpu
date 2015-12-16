@@ -77,6 +77,43 @@ void setupDevice(int* preferred) {
   *preferred = device;
 }
 
+void printDeviceInfo(int device) {
+  struct cudaDeviceProp properties;
+  cudaGetDeviceProperties(&properties, device);
+  std::cout << "maxThreadsPerBlock = " << properties.maxThreadsPerBlock << "\n";
+  std::cout << "name = " << properties.name << "\n";
+  std::cout << "totalGlobalMem = " << properties.totalGlobalMem << "\n";
+  std::cout << "sharedMemPerBlock = " << properties.sharedMemPerBlock << "\n";
+  std::cout << "regsPerBlock = " << properties.regsPerBlock << "\n";
+  std::cout << "warpSize = " << properties.warpSize << "\n";
+  std::cout << "memPitch = " << properties.memPitch << "\n";
+  std::cout << "maxThreadsPerBlock = " << properties.maxThreadsPerBlock << "\n";
+  std::cout << "maxThreadsDim[0] = " << properties.maxThreadsDim[0] << "\n";
+  std::cout << "maxThreadsDim[1] = " << properties.maxThreadsDim[1] << "\n";
+  std::cout << "maxThreadsDim[2] = " << properties.maxThreadsDim[2] << "\n";
+  std::cout << "maxGridSize[0] = " << properties.maxGridSize[0] << "\n";
+  std::cout << "maxGridSize[1] = " << properties.maxGridSize[1] << "\n";
+  std::cout << "maxGridSize[2] = " << properties.maxGridSize[2] << "\n";
+  std::cout << "totalConstMem = " << properties.totalConstMem << "\n";
+  std::cout << "major = " << properties.major << "\n";
+  std::cout << "minor = " << properties.minor << "\n";
+  std::cout << "clockRate = " << properties.clockRate << "\n";
+  std::cout << "textureAlignment = " << properties.textureAlignment << "\n";
+  std::cout << "deviceOverlap = " << properties.deviceOverlap << "\n";
+  std::cout << "multiProcessorCount = " << properties.multiProcessorCount
+            << "\n";
+  std::cout << "kernelExecTimeoutEnabled = "
+            << properties.kernelExecTimeoutEnabled << "\n";
+  std::cout << "integrated = " << properties.integrated << "\n";
+  std::cout << "canMapHostMemory = " << properties.canMapHostMemory << "\n";
+  std::cout << "computeMode = " << properties.computeMode << "\n";
+  std::cout << "concurrentKernels = " << properties.concurrentKernels << "\n";
+  std::cout << "ECCEnabled = " << properties.ECCEnabled << "\n";
+  std::cout << "pciBusID = " << properties.pciBusID << "\n";
+  std::cout << "pciDeviceID = " << properties.pciDeviceID << "\n";
+  std::cout << "tccDriver = " << properties.tccDriver << "\n";
+}
+
 int main(int argc, char** argv) {
   ConfigLoader config;
   BuildOptions buildOptions;
@@ -138,6 +175,7 @@ int main(int argc, char** argv) {
     int device = 1;
     setupDevice(&device);
     std::cout << "Device = " << device << "\n";
+    printDeviceInfo(device);
   }
 
   if (!foundObj) {
