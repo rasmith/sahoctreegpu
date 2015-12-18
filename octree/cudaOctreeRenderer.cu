@@ -234,8 +234,8 @@ __device__ __inline__ float max4(float a, float b, float c, float d) {
   return fmaxf(fmaxf(fmaxf(a, b), c), d);
 }
 
-inline __device__ bool intersectAabb2(const float3& origin,
-                                      const float3& invDirection,
+inline __device__ bool intersectAabb2(float3 origin,
+                                      float3 invDirection,
                                       const Aabb& bounds, float t0, float t1,
                                       float* tNear, float* tFar) {
   const float3 ood = origin * invDirection;
@@ -576,7 +576,7 @@ inline __device__ __host__ void getChildren(
 #define DEBUG_TRAVERSE_THREAD_ID 0
 //#define DEBUG_TRAVERSE_THREAD_ID 386858  // t = 0.485482
 #endif
-inline __device__ bool intersectOctree(const Ray* rays,
+inline __device__ bool intersectOctree(volatile const Ray* rays,
                                        int rayCount, const int3* indices,
                                        const float3* vertices,
                                        const Octree<LAYOUT_SOA>* octree,
@@ -607,7 +607,7 @@ inline __device__ bool intersectOctree(const Ray* rays,
 #endif
 
   bool goodThread = rayIdx < rayCount;
-  const Ray& ray = rays[goodThread * rayIdx + !goodThread * (rayIdx - 1)];
+  volatile const Ray& ray = rays[goodThread * rayIdx + !goodThread * (rayIdx - 1)];
   const OctNodeHeader* headers = octree->nodeStorage().headers;
   const OctNodeFooter<uint64_t>* footers = octree->nodeStorage().footers;
   int nodeIdStack[kStackSize];
@@ -824,7 +824,9 @@ __global__
   closest.t = NPP_MAXABS_32F;
   closest.triId = -1;
 #ifdef USE_OCTREE
-  intersectOctree(rays, rayCount, indices, vertices, octree, isect);
+  volatile __shared__ Ray localRays[THREADS_PER_BLOCK];
+  localRays[threadIdx.x] = rays[rayIdx];
+  intersectOctree(localRays, rayCount, indices, vertices, octree, isect);
   updateClosest(&isect, &closest);
 #else
   if (rayIdx < rayCount) {
