@@ -14,7 +14,7 @@
 #define THREADS_PER_BLOCK 128
 #define REGISTERS_PER_SM (1 << 15)
 #define SHARED_MEMORY_PER_SM (1 << 15)
-#define MAX_REGISTERS_THREAD 63
+#define MAX_REGISTERS_THREAD 53
 #define MIN_BLOCKS \
   ((REGISTERS_PER_SM) / (THREADS_PER_BLOCK * MAX_REGISTERS_THREAD))
 #define MAX_SHARED_MEMORY_PER_BLOCK SHARED_MEMORY_PER_SM / MIN_BLOCKS
@@ -181,7 +181,7 @@ inline __device__ __host__ void updateClosest(const Hit* isect, Hit* closest) {
   closest->v = isect->v;
 }
 
-#define USE_COALESCED_HIT_UPDATE
+//#define USE_COALESCED_HIT_UPDATE
 inline __device__ __host__ void updateHitBuffer(const Hit& closest,
                                                 Hit* hitBuf) {
 #ifdef USE_COALESCED_HIT_UPDATE
@@ -234,13 +234,13 @@ __device__ __inline__ float max4(float a, float b, float c, float d) {
   return fmaxf(fmaxf(fmaxf(a, b), c), d);
 }
 
-inline __device__ bool intersectAabb2(float3 origin,
-                                      float3 invDirection,
+inline __device__ bool intersectAabb2(const float3& origin,
+                                      const float3& invDirection,
                                       const Aabb& bounds, float t0, float t1,
                                       float* tNear, float* tFar) {
   const float3 ood = origin * invDirection;
-  const float3 min_bounds = bounds[0];
-  const float3 max_bounds = bounds[1];
+  const float3& min_bounds = bounds[0];
+  const float3& max_bounds = bounds[1];
   float3 tmins = (min_bounds - origin) * invDirection;
   float3 tmaxs = (max_bounds - origin) * invDirection;
   float tminbox = max4(t0, fminf(tmins.x, tmaxs.x), fminf(tmins.y, tmaxs.y),
@@ -310,9 +310,9 @@ inline __device__ __host__ bool intersectTriangle(
   const int* a_indices = reinterpret_cast<const int*>(indices);
   const int* b_indices = a_indices + numTriangles;
   const int* c_indices = b_indices + numTriangles;
-  int trix = a_indices[triId];
-  int triy = b_indices[triId];
-  int triz = c_indices[triId];
+  const int& trix = a_indices[triId];
+  const int& triy = b_indices[triId];
+  const int& triz = c_indices[triId];
 #else
   const int3 tri = indices[triId];
   int trix = tri.x;
@@ -323,15 +323,15 @@ inline __device__ __host__ bool intersectTriangle(
   const float* x_values = reinterpret_cast<const float*>(vertices);
   const float* y_values = x_values + numVertices;
   const float* z_values = y_values + numVertices;
-  const float ax = x_values[trix];
-  const float bx = x_values[triy];
-  const float cx = x_values[triz];
-  const float ay = y_values[trix];
-  const float by = y_values[triy];
-  const float cy = y_values[triz];
-  const float az = z_values[trix];
-  const float bz = z_values[triy];
-  const float cz = z_values[triz];
+  const float& ax = x_values[trix];
+  const float& bx = x_values[triy];
+  const float& cx = x_values[triz];
+  const float& ay = y_values[trix];
+  const float& by = y_values[triy];
+  const float& cy = y_values[triz];
+  const float& az = z_values[trix];
+  const float& bz = z_values[triy];
+  const float& cz = z_values[triz];
   const float3 a = make_float3(ax, ay, az);
   const float3 b = make_float3(bx, by, bz);
   const float3 c = make_float3(cx, cy, cz);
@@ -576,16 +576,15 @@ inline __device__ __host__ void getChildren(
 #define DEBUG_TRAVERSE_THREAD_ID 0
 //#define DEBUG_TRAVERSE_THREAD_ID 386858  // t = 0.485482
 #endif
-inline __device__ bool intersectOctree(volatile const Ray* rays,
-                                       int rayCount, const int3* indices,
+#define MAX_DEPTH  10
+#define MAX_EVENTS  4
+#define STACK_SIZE  (MAX_EVENTS * MAX_DEPTH)
+inline __device__ bool intersectOctree(const Ray* rays, int rayCount,
+                                       const int3* indices,
                                        const float3* vertices,
                                        const Octree<LAYOUT_SOA>* octree,
                                        Hit& closest) {
-
   volatile int rayIdx = threadIdx.x + blockDim.x * blockIdx.x;
-  const uint16_t kMaxDepth = 10;
-  const uint16_t kMaxEvents = 4;
-  const uint16_t kStackSize = kMaxEvents * kMaxDepth;
 
 // NOTE:
 //    1) We need to examine 4 nodes per octree node.
@@ -607,34 +606,20 @@ inline __device__ bool intersectOctree(volatile const Ray* rays,
 #endif
 
   bool goodThread = rayIdx < rayCount;
-  volatile const Ray& ray = rays[goodThread * rayIdx + !goodThread * (rayIdx - 1)];
+  const Ray& ray = rays[goodThread * rayIdx + !goodThread * (rayIdx - 1)];
   const OctNodeHeader* headers = octree->nodeStorage().headers;
   const OctNodeFooter<uint64_t>* footers = octree->nodeStorage().footers;
-  int nodeIdStack[kStackSize];
-  Aabb aabbStack[kStackSize];
-  float tNearStack[kStackSize];
-  float tFarStack[kStackSize];
+  int nodeIdStack[STACK_SIZE];
+  Aabb aabbStack[STACK_SIZE];
+  float tNearStack[STACK_SIZE];
+  float tFarStack[STACK_SIZE];
   int16_t stackEnd = 1;
-  unsigned char octantBits = 0x0;  // bitmask encodes which children
-  bool terminateRay = false;
-  uint32_t children[8];
-  OctreeEvent events[5];
-  int16_t numEvents = 0;
-  int16_t numValidEvents = 0;
   int currentId = -1;
-  unsigned char octant = 0x0;
   float tNear = 0.0f, tFar = 0.0f;
-  Aabb currentBounds;
-  float3 center;
-  float3 hit = make_float3(0.0f, 0.0f, 0.0f);
   float3 invDirection =
       make_float3(1.0f / ray.dir.x, 1.0f / ray.dir.y, 1.0f / ray.dir.z);
   bool stackEmpty = false;
-  bool triangleHit = false;
-  const OctNodeHeader* currentHeader = NULL;
-  const OctNodeFooter<uint64_t>* currentFooter = NULL;
   bool objectHit = false;
-  Hit isect;
 
 #ifdef DEBUG_TRAVERSE
   uint32_t outer_iters = 0, inner_iters = 0;
@@ -649,29 +634,36 @@ inline __device__ bool intersectOctree(volatile const Ray* rays,
     printf("origin = %f, %f, %f, direction = %f, %f, %f\n", ray.origin.x,
            ray.origin.y, ray.origin.z, ray.dir.x, ray.dir.y, ray.dir.z);
 #endif
-  while (!terminateRay) {
+  while (!(objectHit | stackEmpty)) {
 #ifdef DEBUG_TRAVERSE
     inner_iters = 0;
 #endif
+    const OctNodeHeader* currentHeader = NULL;
+    const OctNodeFooter<uint64_t>* currentFooter = NULL;
     while (!(stackEmpty = (stackEnd <= 0)) &&
            !(headers[currentId = nodeIdStack[--stackEnd]].type == NODE_LEAF)) {
       // Get current node to process.
       currentHeader = &headers[currentId];
       currentFooter = &footers[currentId];
-      currentBounds = aabbStack[stackEnd];
+      Aabb currentBounds = aabbStack[stackEnd];
       tNear = tNearStack[stackEnd];
       tFar = tFarStack[stackEnd];
-      hit = ray.origin + tNear * ray.dir;
-      center = getSplitPoint(currentHeader, currentFooter, currentBounds);
+      float3 hit = ray.origin + tNear * ray.dir;
+      float3 center =
+          getSplitPoint(currentHeader, currentFooter, currentBounds);
+      int16_t numEvents = 0;
+      OctreeEvent events[5];
+      int16_t numValidEvents = 0;
       //  Get the events, in order of they are hit.
       createEvents(ray.origin, ray.dir, invDirection, center, hit, tNear, tFar,
                    events, &numEvents);
-      octantBits = 0x0;
+      unsigned char octantBits = 0x0;
       // Get children.
+      uint32_t children[8];
       getChildren(currentHeader, currentFooter, headers, children, &octantBits);
       // Figure out which octants that were hit are actually occupied by a
       // child node.
-      octant = 0x0;
+      unsigned char octant = 0x0;
       numValidEvents = 0;
       for (int16_t i = 0; i < numEvents - 1; ++i) {
         octant = octant ^ events[i].mask;
@@ -679,7 +671,6 @@ inline __device__ bool intersectOctree(volatile const Ray* rays,
         numValidEvents += hasChild;
 #ifdef DEBUG_TRAVERSE
         if (i > 5) {
-          terminateRay = true;
           return false;
         }
 #endif
@@ -720,7 +711,6 @@ inline __device__ bool intersectOctree(volatile const Ray* rays,
         }
 #ifdef DEBUG_TRAVERSE
         if (i > 5) {
-          terminateRay = true;
           return false;
         }
 #endif
@@ -737,7 +727,6 @@ inline __device__ bool intersectOctree(volatile const Ray* rays,
         /*stackEnd);*/
       }
       if (inner_iters > 128) {
-        terminateRay = true;
         return false;
       }
 #endif
@@ -762,7 +751,7 @@ inline __device__ bool intersectOctree(volatile const Ray* rays,
     tNear = (stackEmpty ? 0.0f : tNearStack[stackEnd]);
     tFar = (stackEmpty ? 0.0f : tFarStack[stackEnd]);
 #endif
-    triangleHit = false;
+    bool triangleHit = false;
 #ifdef DEBUG_TRAVERSE_THREAD_ID
     if (tid == DEBUG_TRAVERSE_THREAD_ID && !stackEmpty)
       printf("LEAF: @%d +%d #%d t_n = %f, t_f = %f #=%d c.t = %f\n",
@@ -771,6 +760,9 @@ inline __device__ bool intersectOctree(volatile const Ray* rays,
 #endif
     for (uint32_t i = 0; i < numPrimitives; ++i) {
       uint32_t triId = octree->getTriangleId(i + offset);
+      Hit isect;
+      isect.t = NPP_MAXABS_32F;
+      isect.triId = -1;
       bool isNewClosest =
           intersectTriangle(ray, indices, vertices, triId, isect,
                             octree->numTriangles(), octree->numVertices()) &
@@ -788,17 +780,14 @@ inline __device__ bool intersectOctree(volatile const Ray* rays,
 #endif
 #ifdef DEBUG_TRAVERSE
       if (i > 32) {
-        terminateRay = true;
         return false;
       }
 #endif
     }
     objectHit = triangleHit & (closest.t >= tNear) & (closest.t <= tFar);
-    terminateRay = objectHit | stackEmpty;
 #ifdef DEBUG_TRAVERSE
     ++outer_iters;
     if (outer_iters > 32) {
-      terminateRay = true;
       return false;
     }
 #endif
@@ -814,7 +803,7 @@ __global__
         void traceKernel(const Ray* rays, const int3* indices,
                          const float3* vertices, const int rayCount,
                          const Octree<LAYOUT_SOA>* octree, const int triCount,
-                           Hit* hits) {
+                         Hit* hits) {
 
   volatile int rayIdx = threadIdx.x + blockIdx.x * blockDim.x;
   Hit isect;
@@ -824,9 +813,7 @@ __global__
   closest.t = NPP_MAXABS_32F;
   closest.triId = -1;
 #ifdef USE_OCTREE
-  volatile __shared__ Ray localRays[THREADS_PER_BLOCK];
-  localRays[threadIdx.x] = rays[rayIdx];
-  intersectOctree(localRays, rayCount, indices, vertices, octree, isect);
+  intersectOctree(rays, rayCount, indices, vertices, octree, isect);
   updateClosest(&isect, &closest);
 #else
   if (rayIdx < rayCount) {
