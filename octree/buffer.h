@@ -62,6 +62,7 @@ class Buffer {
   size_t count() { return m_count; }
   size_t sizeInBytes() { return m_count * sizeof(T); }
   T* ptr() { return m_ptr; }
+  T** ptrptr() { return &m_ptr; }
   RTPbuffertype type() { return m_type; }
 
  protected:
