@@ -9,12 +9,20 @@
 
 #define kEpsilon 1e-18
 
+
+//#define USE_VOLATILE
+#ifdef USE_VOLATILE
+#define VOLATILE volatile
+#else
+#define VOLATILE
+#endif
+
 #define HIT_SIZE sizeof(Hit)
 #define RAY_SIZE sizeof(Ray)
 #define THREADS_PER_BLOCK 128
 #define REGISTERS_PER_SM (1 << 15)
 #define SHARED_MEMORY_PER_SM (1 << 15)
-#define MAX_REGISTERS_THREAD 54
+#define MAX_REGISTERS_THREAD 30
 #define MIN_BLOCKS \
   ((REGISTERS_PER_SM) / (THREADS_PER_BLOCK * MAX_REGISTERS_THREAD))
 #define MAX_SHARED_MEMORY_PER_BLOCK SHARED_MEMORY_PER_SM / MIN_BLOCKS
@@ -304,8 +312,8 @@ inline __device__ __host__ void permute3(const I* order, T* a) {
   exchangeIf(lessThan, &tempI, tempOrder + 1, tempOrder + 2);
 };
 
-inline __device__ __host__ void updateClosest(volatile Hit* isect,
-                                              volatile Hit* closest) {
+inline __device__ __host__ void updateClosest(VOLATILE Hit* isect,
+                                              VOLATILE Hit* closest) {
   closest->t = isect->t;
   closest->triId = isect->triId;
   closest->u = isect->u;
@@ -313,7 +321,7 @@ inline __device__ __host__ void updateClosest(volatile Hit* isect,
 }
 
 //#define USE_COALESCED_HIT_UPDATE
-inline __device__ __host__ void updateHitBuffer(volatile Hit* closest,
+inline __device__ __host__ void updateHitBuffer(VOLATILE Hit* closest,
                                                 Hit* hitBuf) {
 #ifdef USE_COALESCED_HIT_UPDATE
   unsigned char* out = reinterpret_cast<unsigned char*>(hitBuf);
@@ -365,7 +373,7 @@ __device__ __inline__ float max4(float a, float b, float c, float d) {
   return fmaxf(fmaxf(fmaxf(a, b), c), d);
 }
 
-inline __device__ bool intersectAabb2(volatile float3* origin,
+inline __device__ bool intersectAabb2(VOLATILE const float3* origin,
                                       const float4& invDirection,
                                       const Aabb4& bounds, float t0, float t1,
                                       float* tNear, float* tFar) {
@@ -447,7 +455,7 @@ inline __device__ __host__ bool intersectAabb(const float3& origin,
 
 #define DIVERGENCE_FREE_INSTERSECT_TRIANGLE
 inline __device__ __host__ bool intersectTriangle(
-    volatile Ray* ray, const int4* indices, const float4* vertices,
+    VOLATILE const Ray* ray, const int4* indices, const float4* vertices,
     const int triId, Hit& isect, int numTriangles, int numVertices) {
 #ifdef REMAP_INDICES_SOA
   const int* a_indices = reinterpret_cast<const int*>(indices);
@@ -531,8 +539,89 @@ inline __device__ __host__ bool intersectTriangle(
 #endif
 }
 
+inline __host__ __device__ __host__ void createEvents0(
+    VOLATILE const float3* origin, VOLATILE const float3* direction,
+    const float4& invDirection, const float4& center, const float4& hit,
+    float tNear, float tFar, OctreeEvent* events, int16_t* N) {
+  float4 diff_center_origin = make_float4(
+      center.x - origin->x, center.y - origin->y, center.z - origin->z, 0.0f);
+  float4 t = make_float4(diff_center_origin.x * invDirection.x,
+                         diff_center_origin.y * invDirection.y,
+                         diff_center_origin.z * invDirection.z, 0.0f);
+  // Create the events, unsorted.
+  events[1].type = OCTREE_EVENT_X;
+  events[1].mask = 0x1;
+  events[1].t = t.x;
+  events[2].type = OCTREE_EVENT_Y;
+  events[2].mask = 0x2;
+  events[2].t = t.y;
+  events[2].type = OCTREE_EVENT_Z;
+  events[2].mask = 0x4;
+  events[2].t = t.z;
+  // Sort the planarEvents, so we can implement a front-to-back traversal.
+  exchangeIf(
+      !isValidT(events[2].t, tNear, tFar) |
+          (events[2].t > events[3].t & isValidT(events[3].t, tNear, tFar)),
+      &events[0], &events[2], &events[3]);
+  exchangeIf(
+      !isValidT(events[1].t, tNear, tFar) |
+          (events[1].t > events[2].t & isValidT(events[2].t, tNear, tFar)),
+      &events[0], &events[1], &events[2]);
+  exchangeIf(
+      !isValidT(events[2].t, tNear, tFar) |
+          (events[2].t > events[3].t & isValidT(events[3].t, tNear, tFar)),
+      &events[0], &events[2], &events[3]);
+  // Discard planarEvents with t > tFar.
+  // k is the index of the last event.
+  int k = 2;
+  while (k >= 0 && !isValidT(events[k + 1].t, tNear, tFar)) --k;
+  // Consolidate planarEvents that have the same t-value.
+  // There are only 1, 2, or 3 planarEvents, so we just explicitly compute
+  // this.
+  if (k == 2) {
+    bool left_equal = (events[1].t == events[2].t);
+    bool right_equal = (events[2].t == events[3].t);
+    if (left_equal && right_equal) {
+      events[1].mask = events[1].mask | events[2].mask | events[3].mask;
+      k = 0;
+    } else if (left_equal) {
+      events[1].mask = events[1].mask | events[2].mask;
+      events[2] = events[3];
+      k = 1;
+    } else if (right_equal) {
+      events[2].mask = events[2].mask | events[3].mask;
+      k = 1;
+    }
+  } else if (k == 1) {
+    if (events[1].t == events[2].t) {
+      events[1].mask = events[1].mask | events[2].mask;
+      k = 0;
+    }
+  }
+  unsigned char xBit = (hit.x > center.x);
+  unsigned char yBit = (hit.y > center.y);
+  unsigned char zBit = (hit.z > center.z);
+  events[0].type = OCTREE_EVENT_ENTRY;
+  events[0].t = tNear;
+  events[0].mask = xBit | (yBit << 1) | (zBit << 2);
+  events[k + 2].type = OCTREE_EVENT_EXIT;
+  events[k + 2].t = tFar;
+  events[k + 2].mask = 0;
+  *N = (k + 1) + 2;
+  unsigned char xMask = (events[1].type == OCTREE_EVENT_X) &
+                        ((xBit == 1) | (direction->x < 0.0f));
+  unsigned char yMask = (events[1].type == OCTREE_EVENT_Y) &
+                        ((yBit == 1) | (direction->y < 0.0f));
+  unsigned char zMask = (events[1].type == OCTREE_EVENT_Z) &
+                        ((zBit == 1) | (direction->z < 0.0f));
+  unsigned char mask = xMask | (yMask << 1) | (zMask << 2);
+  //  if ((k + 1) + 2 > 2 && events[0].t == events[1].t)
+  events[0].mask =
+      events[0].mask ^ (((k + 1) + 2 > 2 && events[0].t == events[1].t) * mask);
+}
+
 inline __host__ __device__ __host__ void createEvents(
-    volatile const float3* origin, volatile const float3* direction,
+    VOLATILE const float3* origin, VOLATILE const float3* direction,
     const float4& invDirection, const float4& center, const float4& hit,
     float tNear, float tFar, OctreeEvent* events, int16_t* N) {
   // Compute the default entry point.
@@ -740,12 +829,16 @@ inline __device__ __host__ void getChildren(
 #define MAX_DEPTH 10
 #define MAX_EVENTS 4
 #define STACK_SIZE (MAX_EVENTS * MAX_DEPTH)
-inline __device__ bool intersectOctree(volatile Ray* rays, int rayCount,
+inline __device__ bool intersectOctree(VOLATILE const Ray* rays, int rayCount,
                                        const int4* indices,
                                        const float4* vertices,
                                        const Octree<LAYOUT_SOA>* octree,
-                                       volatile Hit* closest) {
-  volatile int rayIdx = threadIdx.x;  // + blockDim.x * blockIdx.x;
+                                       VOLATILE Hit* closest) {
+#ifdef USE_VOLATILE
+  VOLATILE int rayIdx = threadIdx.x;
+#else
+  VOLATILE int rayIdx = threadIdx.x  + blockDim.x * blockIdx.x;
+#endif
 
 // NOTE:
 //    1) We need to examine 4 nodes per octree node.
@@ -767,7 +860,7 @@ inline __device__ bool intersectOctree(volatile Ray* rays, int rayCount,
 #endif
 
   bool goodThread = rayIdx < rayCount;
-  volatile Ray* ray = &rays[goodThread * rayIdx + !goodThread * (rayIdx - 1)];
+  VOLATILE const Ray* ray = &rays[goodThread * rayIdx + !goodThread * (rayIdx - 1)];
   const OctNodeHeader* headers = octree->nodeStorage().headers;
   const OctNodeFooter<uint64_t>* footers = octree->nodeStorage().footers;
   int nodeIdStack[STACK_SIZE];
@@ -802,6 +895,7 @@ inline __device__ bool intersectOctree(volatile Ray* rays, int rayCount,
 #endif
     const OctNodeHeader* currentHeader = NULL;
     const OctNodeFooter<uint64_t>* currentFooter = NULL;
+    bool searchMode = true;
     while (!(stackEmpty = (stackEnd <= 0)) &&
            !(headers[currentId = nodeIdStack[--stackEnd]].type == NODE_LEAF)) {
       // Get current node to process.
@@ -819,8 +913,8 @@ inline __device__ bool intersectOctree(volatile Ray* rays, int rayCount,
       OctreeEvent events[5];
       int16_t numValidEvents = 0;
       //  Get the events, in order of they are hit.
-      createEvents(&ray->origin, &ray->dir, invDirection, center, hit, tNear,
-                   tFar, events, &numEvents);
+      createEvents0(&ray->origin, &ray->dir, invDirection, center, hit, tNear,
+                    tFar, events, &numEvents);
       unsigned char octantBits = 0x0;
       // Get children.
       uint32_t children[8];
@@ -969,8 +1063,9 @@ __global__
                          const Octree<LAYOUT_SOA>* octree, const int triCount,
                          Hit* hits) {
 
-  volatile int rayIdx = threadIdx.x + blockIdx.x * blockDim.x;
-  volatile __shared__ Ray localRays[THREADS_PER_BLOCK];
+  VOLATILE int rayIdx = threadIdx.x + blockIdx.x * blockDim.x;
+#ifdef USE_VOLATILE
+  VOLATILE __shared__ Ray localRays[THREADS_PER_BLOCK];
   localRays[threadIdx.x].origin.x = rays[rayIdx].origin.x;
   localRays[threadIdx.x].origin.y = rays[rayIdx].origin.y;
   localRays[threadIdx.x].origin.z = rays[rayIdx].origin.z;
@@ -978,14 +1073,19 @@ __global__
   localRays[threadIdx.x].dir.x = rays[rayIdx].dir.x;
   localRays[threadIdx.x].dir.y = rays[rayIdx].dir.y;
   localRays[threadIdx.x].dir.z = rays[rayIdx].dir.z;
-  volatile Hit isect;
-  volatile Hit closest;
+#endif
+  VOLATILE Hit isect;
+  VOLATILE Hit closest;
   isect.t = NPP_MAXABS_32F;
   isect.triId = -1;
   closest.t = NPP_MAXABS_32F;
   closest.triId = -1;
 #ifdef USE_OCTREE
+#ifdef USE_VOLATILE
   intersectOctree(localRays, rayCount, indices, vertices, octree, &isect);
+#else
+  intersectOctree(rays, rayCount, indices, vertices, octree, &isect);
+#endif
   updateClosest(&isect, &closest);
 #else
   if (rayIdx < rayCount) {
