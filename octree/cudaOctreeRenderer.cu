@@ -9,7 +9,6 @@
 
 #define kEpsilon 1e-18
 
-
 //#define USE_VOLATILE
 #ifdef USE_VOLATILE
 #define VOLATILE volatile
@@ -19,10 +18,10 @@
 
 #define HIT_SIZE sizeof(Hit)
 #define RAY_SIZE sizeof(Ray)
-#define THREADS_PER_BLOCK 128
+#define THREADS_PER_BLOCK  128
 #define REGISTERS_PER_SM (1 << 15)
 #define SHARED_MEMORY_PER_SM (1 << 15)
-#define MAX_REGISTERS_THREAD 30
+#define MAX_REGISTERS_THREAD 63
 #define MIN_BLOCKS \
   ((REGISTERS_PER_SM) / (THREADS_PER_BLOCK * MAX_REGISTERS_THREAD))
 #define MAX_SHARED_MEMORY_PER_BLOCK SHARED_MEMORY_PER_SM / MIN_BLOCKS
@@ -178,7 +177,7 @@ template <typename T>
 inline __device__ __host__ const T* RunTimeSelect(bool condition,
                                                   const T* trueResult,
                                                   const T* falseResult) {
-  const uintptr_t c = condition;
+  const uintptr_t c = condition * 0xFFFFFFFFFFFFFFFF;
   return reinterpret_cast<const T*>(
       ((reinterpret_cast<uintptr_t>(trueResult) & c) |
        (reinterpret_cast<uintptr_t>(falseResult) & ~c)));
@@ -837,7 +836,7 @@ inline __device__ bool intersectOctree(VOLATILE const Ray* rays, int rayCount,
 #ifdef USE_VOLATILE
   VOLATILE int rayIdx = threadIdx.x;
 #else
-  VOLATILE int rayIdx = threadIdx.x  + blockDim.x * blockIdx.x;
+  VOLATILE int rayIdx = threadIdx.x + blockDim.x * blockIdx.x;
 #endif
 
 // NOTE:
@@ -860,7 +859,8 @@ inline __device__ bool intersectOctree(VOLATILE const Ray* rays, int rayCount,
 #endif
 
   bool goodThread = rayIdx < rayCount;
-  VOLATILE const Ray* ray = &rays[goodThread * rayIdx + !goodThread * (rayIdx - 1)];
+  VOLATILE const Ray* ray =
+      &rays[goodThread * rayIdx + !goodThread * (rayIdx - 1)];
   const OctNodeHeader* headers = octree->nodeStorage().headers;
   const OctNodeFooter<uint64_t>* footers = octree->nodeStorage().footers;
   int nodeIdStack[STACK_SIZE];
@@ -870,10 +870,15 @@ inline __device__ bool intersectOctree(VOLATILE const Ray* rays, int rayCount,
   int16_t stackEnd = 1;
   int currentId = -1;
   float tNear = 0.0f, tFar = 0.0f;
+  float dummyTNear = 0.0f, dummyTFar = 0.0f;
   float4 invDirection = make_float4(1.0f / ray->dir.x, 1.0f / ray->dir.y,
                                     1.0f / ray->dir.z, 0.0f);
   bool stackEmpty = false;
   bool objectHit = false;
+
+  Aabb4 dummyBounds;
+  dummyBounds.min = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+  dummyBounds.max = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
 
 #ifdef DEBUG_TRAVERSE
   uint32_t outer_iters = 0, inner_iters = 0;
@@ -895,15 +900,75 @@ inline __device__ bool intersectOctree(VOLATILE const Ray* rays, int rayCount,
 #endif
     const OctNodeHeader* currentHeader = NULL;
     const OctNodeFooter<uint64_t>* currentFooter = NULL;
+    const OctNodeHeader* leafHeader;
+    const OctNodeFooter<uint64_t>* leafFooter;
+    OctNodeHeader dummyHeader;
+    OctNodeFooter<uint64_t> dummyFooter;
+    dummyHeader.type = NODE_INTERNAL;
+    dummyHeader.offset = 0;
+    dummyHeader.octant = 0;
+    dummyFooter.internal.numChildren = 0;
+    dummyFooter.internal.i = 0;
+    dummyFooter.internal.j = 0;
+    dummyFooter.internal.k = 0;
+    dummyFooter.internal.sizeDescriptor = 0;
     bool searchMode = true;
-    while (!(stackEmpty = (stackEnd <= 0)) &&
-           !(headers[currentId = nodeIdStack[--stackEnd]].type == NODE_LEAF)) {
-      // Get current node to process.
+    int leafId = -1;
+    float tNearLeaf = 0.0f, tFarLeaf = 0.0f;
+    leafFooter = &dummyFooter;
+    leafHeader = &dummyHeader;
+    while (1) {
+      stackEmpty = (stackEnd <= 0);
+      stackEnd -= searchMode;
+      currentId = !stackEmpty * nodeIdStack[!stackEmpty * stackEnd];
+      bool foundLeaf = (headers[currentId].type == NODE_LEAF);
+//#define SPECULATIVE
+#ifdef SPECULATIVE
+      searchMode = searchMode & !stackEmpty & !foundLeaf;
+
+      bool updateLeaf = (foundLeaf && leafId == -1);
+
+      // Load the root, if not in searchMode.
+      leafId = updateLeaf * currentId + !updateLeaf * leafId;
+      leafFooter = RunTimeSelect(updateLeaf, &footers[currentId], leafFooter);
+      leafHeader = RunTimeSelect(updateLeaf, &headers[currentId], leafHeader);
+      tNearLeaf = *RunTimeSelect(updateLeaf, &tNearStack[stackEnd], &dummyTNear);
+      tFarLeaf = *RunTimeSelect(updateLeaf, &tFarStack[stackEnd], &dummyTFar);
+
+      // Check to see if any thread in this warp is currently searching.
+      if (!__any(searchMode)) break;
+/*if (!searchMode) break;*/
+#else
+      bool updateLeaf = (foundLeaf && leafId == -1);
+      searchMode = !stackEmpty & !foundLeaf;
+      // Load the root, if not in searchMode.
+      leafId = updateLeaf * currentId + !updateLeaf * leafId;
+      leafFooter = RunTimeSelect(updateLeaf, &footers[currentId], leafFooter);
+      leafHeader = RunTimeSelect(updateLeaf, &headers[currentId], leafHeader);
+      tNearLeaf = *RunTimeSelect(updateLeaf, &tNearStack[stackEnd], &dummyTNear);
+      tFarLeaf = *RunTimeSelect(updateLeaf, &tFarStack[stackEnd], &dummyTFar);
+      if (!searchMode) break;
+#endif
+
+/*while (!(stackEmpty = (stackEnd <= 0)) &&*/
+/*!(headers[currentId = nodeIdStack[--stackEnd]].type == NODE_LEAF)) {*/
+// Get current node to process.
+#ifdef SPECULATIVE
+      currentHeader =
+          RunTimeSelect(searchMode, &headers[currentId], &dummyHeader);
+      currentFooter =
+          RunTimeSelect(searchMode, &footers[currentId], &dummyFooter);
+      Aabb4 currentBounds =
+          *RunTimeSelect(searchMode, &aabbStack[stackEnd], &dummyBounds);
+      tNear = *RunTimeSelect(searchMode, &tNearStack[stackEnd], &dummyTNear);
+      tFar = *RunTimeSelect(searchMode, &tFarStack[stackEnd], &dummyTFar);
+#else
       currentHeader = &headers[currentId];
       currentFooter = &footers[currentId];
       Aabb4 currentBounds = aabbStack[stackEnd];
       tNear = tNearStack[stackEnd];
       tFar = tFarStack[stackEnd];
+#endif
       float4 hit = make_float4(ray->origin.x + tNear * ray->dir.x,
                                ray->origin.y + tNear * ray->dir.y,
                                ray->origin.z + tNear * ray->dir.z, 0.0f);
@@ -957,7 +1022,11 @@ inline __device__ bool intersectOctree(VOLATILE const Ray* rays, int rayCount,
         k += hasChild;
         int16_t nextStack = stackEnd + numValidEvents - k - 1;
 
+#ifdef SPECULATIVE
+        if (hasChild && searchMode) {  // divergence
+#else
         if (hasChild) {  // divergence
+#endif
 #ifdef DEBUG_TRAVERSE_THREAD_ID
           if (tid == DEBUG_TRAVERSE_THREAD_ID)
             printf("children[%d] = %d\n", octant, children[octant]);
@@ -973,7 +1042,11 @@ inline __device__ bool intersectOctree(VOLATILE const Ray* rays, int rayCount,
         }
 #endif
       }
+#ifdef SPECULATIVE
+      stackEnd += searchMode * numValidEvents;
+#else
       stackEnd += numValidEvents;
+#endif
 #ifdef DEBUG_TRAVERSE
       ++inner_iters;
       if (inner_iters > 64 && inner_iters < 74) {
@@ -991,23 +1064,27 @@ inline __device__ bool intersectOctree(VOLATILE const Ray* rays, int rayCount,
     }
 #define DIVERGENCE_FREE_FETCH
 #ifdef DIVERGENCE_FREE_FETCH
-    OctNodeHeader dummy_header;
-    OctNodeFooter<uint64_t> dummy_footer;
-    currentHeader =
-        RunTimeSelect(stackEmpty, &dummy_header, &headers[currentId]);
-    currentFooter =
-        RunTimeSelect(stackEmpty, &dummy_footer, &footers[currentId]);
-    uint32_t numPrimitives = !stackEmpty * currentFooter->leaf.size;
-    uint32_t offset = !stackEmpty * currentHeader->offset;
-    tNear = !stackEmpty * tNearStack[!stackEmpty * stackEnd];
-    tFar = !stackEmpty * tFarStack[!stackEmpty * stackEnd];
+    /*OctNodeHeader dummy_header;*/
+    /*OctNodeFooter<uint64_t> dummy_footer;*/
+    bool validLeafId = (leafId != -1);
+    /*leafHeader =*/
+    /*RunTimeSelect(validLeafId, &dummy_header, &headers[leafId]);*/
+    /*leafFooter =*/
+    /*RunTimeSelect(validLeafId, &dummy_footer, &footers[leafId]);*/
+    uint32_t numPrimitives = validLeafId * leafFooter->leaf.size;
+    uint32_t offset = validLeafId * leafHeader->offset;
+    /*tNear = !stackEmpty * tNearStack[!stackEmpty * stackEnd];*/
+    /*tFar = !stackEmpty * tFarStack[!stackEmpty * stackEnd];*/
+    tNear = tNearLeaf;
+    tFar = tFarLeaf;
 #else
-    currentHeader = (stackEmpty ? NULL : &headers[currentId]);
-    currentFooter = (stackEmpty ? NULL : &footers[currentId]);
-    uint32_t numPrimitives = (stackEmpty ? 0 : currentFooter->leaf.size);
-    uint32_t offset = (stackEmpty ? 0 : currentHeader->offset);
-    tNear = (stackEmpty ? 0.0f : tNearStack[stackEnd]);
-    tFar = (stackEmpty ? 0.0f : tFarStack[stackEnd]);
+    bool validLeafId = (leafId != -1);
+    currentHeader = (validLeafId ? NULL : &headers[leafId]);
+    currentFooter = (validLeafId ? NULL : &footers[leafId]);
+    uint32_t numPrimitives = (validLeafId ? 0 : currentFooter->leaf.size);
+    uint32_t offset = (validLeafId ? 0 : currentHeader->offset);
+/*tNear = (stackEmpty ? 0.0f : tNearStack[stackEnd]);*/
+/*tFar = (stackEmpty ? 0.0f : tFarStack[stackEnd]);*/
 #endif
     bool triangleHit = false;
 #ifdef DEBUG_TRAVERSE_THREAD_ID
