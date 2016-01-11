@@ -922,7 +922,7 @@ inline __device__ bool intersectOctree(VOLATILE const Ray* rays, int rayCount,
       stackEnd -= searchMode;
       currentId = !stackEmpty * nodeIdStack[!stackEmpty * stackEnd];
       bool foundLeaf = (headers[currentId].type == NODE_LEAF);
-//#define SPECULATIVE
+#define SPECULATIVE
 #ifdef SPECULATIVE
       searchMode = searchMode & !stackEmpty & !foundLeaf;
 
@@ -932,8 +932,8 @@ inline __device__ bool intersectOctree(VOLATILE const Ray* rays, int rayCount,
       leafId = updateLeaf * currentId + !updateLeaf * leafId;
       leafFooter = RunTimeSelect(updateLeaf, &footers[currentId], leafFooter);
       leafHeader = RunTimeSelect(updateLeaf, &headers[currentId], leafHeader);
-      tNearLeaf = *RunTimeSelect(updateLeaf, &tNearStack[stackEnd], &dummyTNear);
-      tFarLeaf = *RunTimeSelect(updateLeaf, &tFarStack[stackEnd], &dummyTFar);
+      tNearLeaf = *RunTimeSelect(updateLeaf, &tNearStack[stackEnd], &tNearLeaf);
+      tFarLeaf = *RunTimeSelect(updateLeaf, &tFarStack[stackEnd], &tFarLeaf);
 
       // Check to see if any thread in this warp is currently searching.
       if (!__any(searchMode)) break;
@@ -945,8 +945,8 @@ inline __device__ bool intersectOctree(VOLATILE const Ray* rays, int rayCount,
       leafId = updateLeaf * currentId + !updateLeaf * leafId;
       leafFooter = RunTimeSelect(updateLeaf, &footers[currentId], leafFooter);
       leafHeader = RunTimeSelect(updateLeaf, &headers[currentId], leafHeader);
-      tNearLeaf = *RunTimeSelect(updateLeaf, &tNearStack[stackEnd], &dummyTNear);
-      tFarLeaf = *RunTimeSelect(updateLeaf, &tFarStack[stackEnd], &dummyTFar);
+      tNearLeaf = *RunTimeSelect(updateLeaf, &tNearStack[stackEnd], &tNearLeaf);
+      tFarLeaf = *RunTimeSelect(updateLeaf, &tFarStack[stackEnd], &tFarLeaf);
       if (!searchMode) break;
 #endif
 
