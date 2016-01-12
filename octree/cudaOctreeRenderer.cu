@@ -906,7 +906,7 @@ inline __device__ void intersectOctree(const Ray* rays, int rayCount,
     }
 
     // Get the ray from global storage.
-    localRays[threadIdx.x]  = rays[rayIdx];
+    localRays[threadIdx.x] = rays[rayIdx];
     const Ray* ray = &localRays[threadIdx.x];
 
     // Initialize traversal.
@@ -1162,7 +1162,7 @@ void CUDAOctreeRenderer::traceOnDevice(int3** indices, float3** vertices) {
   // TODO (rsmith0x0): make this configurable.
   const int numThreadsPerBlock = THREADS_PER_BLOCK;
   const int numWarps = 455;
-//      (rayBuffer.count() + WARP_BATCH_SIZE - 1) / WARP_BATCH_SIZE;
+  //      (rayBuffer.count() + WARP_BATCH_SIZE - 1) / WARP_BATCH_SIZE;
   const int numBlocks = (numWarps + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;
   LOG(DEBUG) << "WARP_LOAD_FACTOR = " << WARP_LOAD_FACTOR
              << " WARPS_PER_BLOCK = " << WARPS_PER_BLOCK
