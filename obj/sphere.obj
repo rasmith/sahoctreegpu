@@ -14,7 +14,7 @@
 ####
 
 #	             Vertex list
-#mtllib sphere.mtl
+mtllib sphere.mtl
 
 v 0 -0.5 -0
 v 0.25 -0.433013 -0
