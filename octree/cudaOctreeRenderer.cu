@@ -937,9 +937,9 @@ inline __device__ void intersectOctree(
     // Get the ray from global storage.
     localRays[threadIdx.x] = *(reinterpret_cast<const Ray*>(rays) + rayIdx);
     /**reinterpret_cast<float4*>(&localRays[threadIdx.x]) =*/
-        /*tex1Dfetch(texture_rays, rayIdx * 2);*/
+    /*tex1Dfetch(texture_rays, rayIdx * 2);*/
     /**(reinterpret_cast<float4*>(&localRays[threadIdx.x]) + 1) =*/
-        /*tex1Dfetch(texture_rays, rayIdx * 2 + 1);*/
+    /*tex1Dfetch(texture_rays, rayIdx * 2 + 1);*/
 
     const Ray* ray = &localRays[threadIdx.x];
 
@@ -1177,8 +1177,7 @@ void CUDAOctreeRenderer::buildFromFile(Octree<LAYOUT_SOA>* d_octree) {
   Octree<LAYOUT_AOS> octreeFileAos;
   LOG(DEBUG) << "Building from: " << buildOptions.info << "\n";
   octreeFileAos.buildFromFile(buildOptions.info);
-  octreeFileAos.setGeometry(scene.vertices, scene.indices, scene.numTriangles,
-                            scene.numVertices);
+  octreeFileAos.setGeometry(NULL, NULL, scene.numTriangles, scene.numVertices);
   Octree<LAYOUT_SOA> octreeFileSoa;
   octreeFileSoa.copy(octreeFileAos);
   octreeFileSoa.copyToGpu(d_octree);

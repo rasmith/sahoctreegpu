@@ -57,31 +57,17 @@ inline bool compareBits<0>(const unsigned char *a, const unsigned char *b) {
 ////////////////////////////////////
 template <typename StorageType>
 struct OctNodeStorageTraits {
-  enum {
-    BITS_NUM_CHILDREN
-  };
-  enum {
-    BITS_PER_DIMENSION
-  };
-  enum {
-    BITS_SIZE_DESCRIPTOR
-  };
-  enum {
-    BITS_UNUSED
-  };
+  enum { BITS_NUM_CHILDREN };
+  enum { BITS_PER_DIMENSION };
+  enum { BITS_SIZE_DESCRIPTOR };
+  enum { BITS_UNUSED };
 };
 
 template <>
 struct OctNodeStorageTraits<uint32_t> {
-  enum {
-    BITS_NUM_CHILDREN = 3
-  };
-  enum {
-    BITS_PER_DIMENSION = 8
-  };
-  enum {
-    BITS_SIZE_DESCRIPTOR = 8
-  };
+  enum { BITS_NUM_CHILDREN = 3 };
+  enum { BITS_PER_DIMENSION = 8 };
+  enum { BITS_SIZE_DESCRIPTOR = 8 };
   enum {
     BITS_UNUSED =
         32 - BITS_NUM_CHILDREN - 3 * BITS_PER_DIMENSION - BITS_SIZE_DESCRIPTOR
@@ -90,15 +76,9 @@ struct OctNodeStorageTraits<uint32_t> {
 
 template <>
 struct OctNodeStorageTraits<uint64_t> {
-  enum {
-    BITS_NUM_CHILDREN = 3
-  };
-  enum {
-    BITS_PER_DIMENSION = 15
-  };
-  enum {
-    BITS_SIZE_DESCRIPTOR = 15
-  };
+  enum { BITS_NUM_CHILDREN = 3 };
+  enum { BITS_PER_DIMENSION = 15 };
+  enum { BITS_SIZE_DESCRIPTOR = 15 };
   enum {
     BITS_UNUSED =
         64 - BITS_NUM_CHILDREN - 3 * BITS_PER_DIMENSION - BITS_SIZE_DESCRIPTOR
@@ -119,10 +99,7 @@ struct SizeDescriptorToSamplesPerDimensionPolicy<uint32_t> {
   }
 };
 
-enum OctNodeType {
-  NODE_LEAF,
-  NODE_INTERNAL
-};
+enum OctNodeType { NODE_LEAF, NODE_INTERNAL };
 
 struct OctNodeHeader {
   uint32_t type : 1;
@@ -196,17 +173,11 @@ inline std::ostream &operator<<(
 //
 ////////////////////////////////////
 
-enum {
-  PADDING_NONE = 0,
-  PADDING_QUAD = 4
-};
+enum { PADDING_NONE = 0, PADDING_QUAD = 4 };
 
 typedef OctNodeCompact<uint64_t, PADDING_NONE> OctNode128;
 
-enum Layout {
-  LAYOUT_AOS,
-  LAYOUT_SOA
-};
+enum Layout { LAYOUT_AOS, LAYOUT_SOA };
 
 inline const char *LayoutToString(Layout l) {
   return (l == LAYOUT_AOS ? "AOS" : "SOA");
@@ -533,23 +504,32 @@ class Octree {
                         cudaMemcpyHostToDevice));
 
     // Copy vertices to GPU.
-    LOG(DEBUG) << "copy vertices\n";
     float3 *d_vertices = NULL;
-    CHK_CUDA(
-        cudaMalloc((void **)(&d_vertices), sizeof(float3) * m_numVertices));
-    CHK_CUDA(cudaMemcpy((void *)(d_vertices), (const void *)(m_vertices),
-                        sizeof(float3) * m_numVertices,
-                        cudaMemcpyHostToDevice));
+    if (m_vertices) {
+      LOG(DEBUG) << "copy vertices\n";
+      CHK_CUDA(
+          cudaMalloc((void **)(&d_vertices), sizeof(float3) * m_numVertices));
+      CHK_CUDA(cudaMemcpy((void *)(d_vertices), (const void *)(m_vertices),
+                          sizeof(float3) * m_numVertices,
+                          cudaMemcpyHostToDevice));
+    } else {
+      LOG(DEBUG) << "vertices null - NOT copying\n";
+    }
+    // Copy the pointer.
     CHK_CUDA(cudaMemcpy((void *)(&(d_octree->m_vertices)),
                         (const void *)(&d_vertices), sizeof(float3 *),
                         cudaMemcpyHostToDevice));
 
     // Copy indices to GPU.
-    LOG(DEBUG) << "copy indices\n";
     int3 *d_indices = NULL;
-    CHK_CUDA(cudaMalloc((void **)(&d_indices), sizeof(int3) * m_numTriangles));
-    CHK_CUDA(cudaMemcpy((void *)(d_indices), (const void *)(m_indices),
-                        sizeof(int3) * m_numTriangles, cudaMemcpyHostToDevice));
+    if (m_indices) {
+      LOG(DEBUG) << "copy indices\n";
+      CHK_CUDA(
+          cudaMalloc((void **)(&d_indices), sizeof(int3) * m_numTriangles));
+    } else {
+      LOG(DEBUG) << "indicies null - NOT copying\n";
+    }
+    // Copy the pointer.
     CHK_CUDA(cudaMemcpy((void *)(&(d_octree->m_indices)),
                         (const void *)(&d_indices), sizeof(int3 *),
                         cudaMemcpyHostToDevice));
@@ -639,26 +619,33 @@ class Octree {
     LOG(DEBUG) << "Copy vertices to CPU.\n";
     float3 *d_vertices = NULL;
     if (m_vertices) delete[] m_vertices;
-    m_vertices = new float3[m_numVertices];
-    m_owns_vertices = true;
+    m_vertices = NULL;
     CHK_CUDA(cudaMemcpy((void *)(&d_vertices),
                         (void *)(&(d_octree->m_vertices)), sizeof(float3 *),
                         cudaMemcpyDeviceToHost));
-    CHK_CUDA(cudaMemcpy((void *)(m_vertices), (const void *)(d_vertices),
-                        sizeof(float3) * m_numVertices,
-                        cudaMemcpyDeviceToHost));
+    if (d_vertices) {
+      m_vertices = new float3[m_numVertices];
+      m_owns_vertices = true;
+      CHK_CUDA(cudaMemcpy((void *)(m_vertices), (const void *)(d_vertices),
+                          sizeof(float3) * m_numVertices,
+                          cudaMemcpyDeviceToHost));
+    }
 
     // Copy indices to CPU.
     LOG(DEBUG) << "Copy indices to CPU.\n";
     int3 *d_indices = NULL;
     if (m_indices) delete[] m_indices;
-    m_indices = new int3[m_numTriangles];
-    m_owns_indices = true;
+    m_indices = NULL;
     CHK_CUDA(cudaMemcpy((void *)(&d_indices),
                         (const void *)(&(d_octree->m_indices)), sizeof(int3 *),
                         cudaMemcpyDeviceToHost));
-    CHK_CUDA(cudaMemcpy((void *)(m_indices), (const void *)(d_indices),
-                        sizeof(int3) * m_numTriangles, cudaMemcpyDeviceToHost));
+    if (d_indices) {
+      m_indices = new int3[m_numTriangles];
+      m_owns_indices = true;
+      CHK_CUDA(cudaMemcpy((void *)(m_indices), (const void *)(d_indices),
+                          sizeof(int3) * m_numTriangles,
+                          cudaMemcpyDeviceToHost));
+    }
     LOG(DEBUG) << "done!\n";
   }
 
@@ -670,9 +657,13 @@ class Octree {
     LOG(DEBUG) << "Free triangle references.\n";
     CHK_CUDA(cudaFree((void *)(octree.m_triangleIndices)));
     LOG(DEBUG) << "Free vertices.\n";
-    CHK_CUDA(cudaFree((void *)(octree.m_vertices)));
+    if (octree.m_vertices) {
+      CHK_CUDA(cudaFree((void *)(octree.m_vertices)));
+    }
     LOG(DEBUG) << "Free indices.\n";
-    CHK_CUDA(cudaFree((void *)(octree.m_indices)));
+    if (octree.m_indices) {
+      CHK_CUDA(cudaFree((void *)(octree.m_indices)));
+    }
     octree.m_nodeStorage = NodeStorage<NodeLayout>();
     octree.m_triangleIndices = NULL;
     octree.m_vertices = NULL;
@@ -696,17 +687,24 @@ class Octree {
     os << "m_numVertices = " << m_numVertices << "\n";
     count = (m_numVertices < 10 ? m_numVertices : 10);
     os << "vertices = ";
-    for (uint32_t i = 0; i < count; ++i) {
-      os << m_vertices[i].x << " " << m_vertices[i].y << " " << m_vertices[i].z
-         << "\n";
-    }
+    if (m_vertices) {
+      for (uint32_t i = 0; i < count; ++i) {
+        os << m_vertices[i].x << " " << m_vertices[i].y << " "
+           << m_vertices[i].z << "\n";
+      }
+    } else
+      os << " NULL\n";
     os << "\n";
     count = (m_numTriangles < 10 ? m_numTriangles : 10);
     os << "indices = ";
-    for (uint32_t i = 0; i < count; ++i) {
-      os << m_indices[i].x << " " << m_indices[i].y << " " << m_indices[i].z
-         << "\n";
-    }
+    if (m_indices) {
+      for (uint32_t i = 0; i < count; ++i) {
+        os << m_indices[i].x << " " << m_indices[i].y << " " << m_indices[i].z
+           << "\n";
+      }
+    } else
+      os << " NULL\n";
+
     os << "\n";
   }
 
