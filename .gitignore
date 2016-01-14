@@ -4,3 +4,6 @@ build/
 CMakeFiles/
 *.oct
 CMakeCache.txt
+.cproject
+.project
+obj/
