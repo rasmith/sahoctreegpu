@@ -73,7 +73,13 @@ void setupDevice(int* preferred) {
     CHK_CUDA(cudaSetValidDevices(choices, count));
   }
   int device = -1;
+  size_t freeMemory = 0;
+  size_t totalMemory = 0;
   CHK_CUDA(cudaGetDevice(&device));
+  CHK_CUDA(cudaDeviceReset());
+  CHK_CUDA(cudaMemGetInfo(&freeMemory, &totalMemory));
+  std::cout << "Free memory = " << freeMemory
+            << " totalMemory = " << totalMemory << "\n";
   *preferred = device;
 }
 

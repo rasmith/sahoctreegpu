@@ -26,9 +26,9 @@ Renderer::Renderer(const ConfigLoader& config) {
   CHK_PRIME(rtpBufferDescSetRange(vertexDesc, 0, scene.numVertices));
 
   // Create the Model object
-  CHK_PRIME(rtpModelCreate(context, &model));
-  CHK_PRIME(rtpModelSetTriangles(model, indexDesc, vertexDesc));
-  CHK_PRIME(rtpModelUpdate(model, 0));
+  //CHK_PRIME(rtpModelCreate(context, &model));
+  //CHK_PRIME(rtpModelSetTriangles(model, indexDesc, vertexDesc));
+  //CHK_PRIME(rtpModelUpdate(model, 0));
 }
 
 Renderer::~Renderer() { CHK_PRIME(rtpContextDestroy(context)); }

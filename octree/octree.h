@@ -289,6 +289,14 @@ struct NodeStorageCopier<LAYOUT_SOA, LAYOUT_SOA> {
   void copyToGpu(NodeStorage<LAYOUT_SOA> *d_dest,
                  const NodeStorage<LAYOUT_SOA> *src) {
     LOG(DEBUG) << "copyToGpu: d_dest = " << d_dest << " src = " << src << "\n";
+    LOG(DEBUG) << "copyToGpu: numNodes = " << src->numNodes << "\n";
+    LOG(DEBUG) << "copyToGpu: header bytes = "
+               << sizeof(OctNodeHeader) * src->numNodes << "\n";
+    size_t freeMemory = 0;
+    size_t totalMemory = 0;
+    CHK_CUDA(cudaMemGetInfo(&freeMemory, &totalMemory));
+    LOG(DEBUG) << "copyToGpu: Free memory = " << freeMemory
+               << " totalMemory = " << totalMemory << "\n";
     // Copy the headers.
     OctNodeHeader *d_headers = NULL;
     CHK_CUDA(cudaMalloc((void **)(&d_headers),
