@@ -720,9 +720,17 @@ class Octree {
       const {
     return m_nodeStorage;
   }
+  inline __device__ __host__ const NodeStorage<NodeLayout> *nodeStoragePtr()
+      const {
+    return &m_nodeStorage;
+  }
   inline const uint32_t *triangleIndices() const { return m_triangleIndices; }
+  inline uint32_t **triangleIndicesPtr() { return &m_triangleIndices; }
   inline uint32_t numTriangleReferences() const {
     return m_numTriangleReferences;
+  }
+  inline __device__ __host__ uint32_t *numTriangleReferencesPtr() {
+    return &m_numTriangleReferences;
   }
   inline __device__ __host__ const Aabb &aabb() const { return m_aabb; }
   inline __device__ __host__ uint32_t defaultSampleSizeDescriptor() const {
