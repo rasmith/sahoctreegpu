@@ -28,8 +28,6 @@
 #include <iostream>
 #include <cstdlib>
 #include "configLoader.h"
-#include "rtpSimpleRenderer.h"
-#include "cudaSimpleRenderer.h"
 #include "cudaOctreeRenderer.h"
 
 using oct::BuildOptions;
@@ -195,24 +193,13 @@ int main(int argc, char** argv) {
     printUsageAndExit(argv[0]);
   }
 
-  Renderer* renderer = NULL;
-  if (rtype == CPU_RTP_SIMPLE || rtype == GPU_RTP_SIMPLE) {
-    renderer = new RTPSimpleRenderer(config);
-  } else if (rtype == GPU_CUDA_SIMPLE) {
-    renderer = new CUDASimpleRenderer(config);
-  } else if (rtype == GPU_CUDA_OCTREE) {
-    std::cout << "Using CUDAOctreeRenderer.\n";
-    renderer = new CUDAOctreeRenderer(config, buildOptions);
-  } else {
-    renderer = new RTPSimpleRenderer(config);
-  }
+  CUDAOctreeRenderer renderer(config, buildOptions);
   std::cout << "Rendering...\n";
-  renderer->render();
+  renderer.render();
   std::cout << "Shading...\n";
-  renderer->shade();
+  renderer.shade();
   std::cout << "Writing output...\n";
-  renderer->write();
+  renderer.write();
   std::cout << "Cleaning up...\n";
-  if (renderer) delete renderer;
   std::cout << "Done!\n";
 }

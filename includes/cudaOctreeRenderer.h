@@ -1,13 +1,32 @@
 #ifndef CUDA_OCTREE_RENDERER_H_
 #define CUDA_OCTREE_RENDERER_H_
 
-#include <string.h>
+#include <cstring>
+#include <string>
+#include <vector>
+
 #include <optix_prime/optix_prime.h>
-#include "rtpSimpleRenderer.h"
+
+#include "image.h"
+#include "sceneLoader.h"
 #include "configLoader.h"
 #include "octree.h"
 
 namespace oct {
+
+struct Ray {
+  float3 origin;
+  float tmin;
+  float3 dir;
+  float tmax;
+};
+
+struct Hit {
+  float t;
+  int triId;
+  float u;
+  float v;
+};
 
 struct BuildOptions {
   enum BuildOptionType {
@@ -37,7 +56,7 @@ struct BuildOptions {
   const char* info;
 };
 
-class CUDAOctreeRenderer : public RTPSimpleRenderer {
+class CUDAOctreeRenderer {
  public:
   CUDAOctreeRenderer(const ConfigLoader& c);
   CUDAOctreeRenderer(const ConfigLoader& c, const BuildOptions& options);
@@ -49,13 +68,25 @@ class CUDAOctreeRenderer : public RTPSimpleRenderer {
   inline void setBuildOption(const BuildOptions& options) {
     buildOptions = options;
   }
+  void write() { image.write(); }
+  void shade();
 
- private:
+ protected:
+  void createRaysOrtho(Ray** d_rays, int* numRays);
+  void createRaysOrthoOnDevice(float x0, float y0, float z, float dx, float dy,
+                               int yOffset, int yStride, float4* d_rays);
+  inline int idivCeil(int x, int y) { return (x + y - 1) / y; }
   void loadScene();
-  void generateRays();
   void traceOnDevice(int3** indices, float3** vertices);
+
   ConfigLoader config;
   BuildOptions buildOptions;
+  Scene scene;
+  Ray* d_rays;
+  Hit* d_hits;
+  int numRays;
+  std::vector<Hit> localHits;
+  Image image;
 };
 
 }  // namespace oct

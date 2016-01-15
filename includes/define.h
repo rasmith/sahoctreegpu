@@ -16,18 +16,4 @@
   }                                                                            \
 }
 
-#define CHK_PRIME( code )                                                      \
-{                                                                              \
-  RTPresult res__ = code;                                                      \
-  if( res__ != RTP_SUCCESS )                                                   \
-  {                                                                            \
-    const char* err_string;                                                    \
-    rtpContextGetLastErrorString( context, &err_string );                      \
-    std::cerr << "Error on line " << __LINE__ << ": '"                         \
-              << err_string                                                    \
-              << "' (" << res__ << ")" << std::endl;                           \
-    exit(1);                                                                   \
-  }                                                                            \
-}
-
 #endif

@@ -22,25 +22,21 @@ set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS};--keep;-G;-g;-lineinfo;-Xptxas;-v")
 find_package(OptiX REQUIRED)
 include_directories(${OptiX_INCLUDE})
 
-set(SAMPLES_DIR ${OptiX_INSTALL_DIR}/SDK)
-set(SAMPLES_CUDA_DIR ${OptiX_INSTALL_DIR}/SDK/cuda)
+#set(SAMPLES_DIR ${OptiX_INSTALL_DIR}/SDK)
+#set(SAMPLES_CUDA_DIR ${OptiX_INSTALL_DIR}/SDK/cuda)
 
-configure_file(${OptiX_INSTALL_DIR}/SDK/sampleConfig.h.in 
-               ${CMAKE_CURRENT_BINARY_DIR}/sampleConfig.h
-               @ONLY)
+#configure_file(${OptiX_INSTALL_DIR}/SDK/sampleConfig.h.in 
+               #${CMAKE_CURRENT_BINARY_DIR}/sampleConfig.h
+               #@ONLY)
 
 set(CUDA_SEPARABLE_COMPILATION ON)
 
 cuda_add_executable(
   octree
-  cudaSimpleRenderer.cu
   cudaOctreeRenderer.cu
-  rtpSimpleRenderer.cu
-  cpuSimpleRenderer.cpp
   image.cpp
   main.cpp
   octree.cu
-  renderer.cpp
   sceneLoader.cpp
   third_party/glm/glm.cpp
 )

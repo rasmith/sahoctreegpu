@@ -225,6 +225,19 @@ double getTimeDiffMs(const struct timespec& start, const struct timespec& end) {
   return microsecond_diff;
 }
 
+__global__ void createRaysOrthoKernel(int width, int height, float x0, float y0,
+                                      float z, float dx, float dy,
+                                      float4* d_rays) {
+  int rayx = threadIdx.x + blockIdx.x * blockDim.x;
+  int rayy = threadIdx.y + blockIdx.y * blockDim.y;
+  if (rayx >= width || rayy >= height) return;
+
+  int idx = rayx + rayy * width;
+  d_rays[2 * idx + 0] =
+      make_float4(x0 + rayx * dx, y0 + rayy * dy, z, 0);  // origin, tmin
+  d_rays[2 * idx + 1] = make_float4(0, 0, 1, 1e34f);      // dir, tmax
+}
+
 #ifdef UPDATE_HITS_SOA
 __global__ __launch_bounds__(THREADS_PER_BLOCK,
                              MIN_BLOCKS) void reorderHitsKernel(Hit* hits,
@@ -791,28 +804,65 @@ __global__
 #ifdef USE_TRACE_KERNEL_LAUNCH_BOUNDS
     __launch_bounds__(THREADS_PER_BLOCK, MIN_BLOCKS)
 #endif
-    void traceKernel(const float4* rays, const uint32_t* headers,
-                     const uint2* footers, const float4* vertices,
-                     const int4* indices, const uint32_t* references,
-                     const Aabb4 bounds, uint32_t numTriangles,
-                     uint32_t numVertices, uint32_t numRays, Hit* hits) {
+        void traceKernel(const float4* rays, const uint32_t* headers,
+                         const uint2* footers, const float4* vertices,
+                         const int4* indices, const uint32_t* references,
+                         const Aabb4 bounds, uint32_t numTriangles,
+                         uint32_t numVertices, uint32_t numRays, Hit* hits) {
   intersectOctree(rays, headers, footers, vertices, indices, references, bounds,
                   numTriangles, numVertices, numRays, hits);
 }
 
-CUDAOctreeRenderer::CUDAOctreeRenderer(const ConfigLoader& c)
-    : RTPSimpleRenderer(config), config(c) {}
+CUDAOctreeRenderer::CUDAOctreeRenderer(const ConfigLoader& c) : config(c) {
+  image.filename = config.imageFilename;
+  image.width = config.imageWidth;
+}
 
 CUDAOctreeRenderer::CUDAOctreeRenderer(const ConfigLoader& c,
                                        const BuildOptions& options)
-    : RTPSimpleRenderer(c), config(c), buildOptions(options) {}
+    : config(c), buildOptions(options) {
+  image.filename = config.imageFilename;
+  image.width = config.imageWidth;
+}
+
+void CUDAOctreeRenderer::createRaysOrtho(Ray** d_rays, int* numRays) {
+  float margin = 0.05f;
+  int yOffset = 0;
+  int yStride = 1;
+
+  float3& bbmax = scene.bbmax;
+  float3& bbmin = scene.bbmin;
+  float3 bbspan = bbmax - bbmin;
+
+  // Set height according to aspect ratio of bounding box
+  image.height = (int)(image.width * bbspan.y / bbspan.x);
+
+  float dx = bbspan.x * (1 + 2 * margin) / image.width;
+  float dy = bbspan.y * (1 + 2 * margin) / image.height;
+  float x0 = bbmin.x - bbspan.x * margin + dx / 2;
+  float y0 = bbmin.y - bbspan.y * margin + dy / 2;
+  float z = bbmin.z - std::max(bbspan.z, 1.0f) * .001f;
+  int rows = idivCeil((image.height - yOffset), yStride);
+  int count = image.width * rows;
+
+  // Allocate buffer for rays.
+  CHK_CUDA(cudaMalloc(d_rays, sizeof(Ray) * count));
+
+  // Generate rays on device.
+  dim3 blockSize(32, 16);
+  dim3 gridSize(idivCeil(image.width, blockSize.x),
+                idivCeil(rows, blockSize.y));
+  createRaysOrthoKernel<<<gridSize, blockSize>>>(
+      image.width, rows, x0, y0 + dy * yOffset, z, dx, dy * yStride,
+      (float4*)*d_rays);
+  cudaDeviceSynchronize();
+
+  *numRays = count;
+}
 
 void CUDAOctreeRenderer::loadScene() {
   SceneLoader loader(config.objFilename);
   loader.load(&scene);
-}
-
-void CUDAOctreeRenderer::generateRays() {
 }
 
 void CUDAOctreeRenderer::render() {
@@ -908,14 +958,36 @@ void CUDAOctreeRenderer::build(Octree<LAYOUT_SOA>* d_octree) {
 }
 
 void CUDAOctreeRenderer::traceOnDevice(int3** indices, float3** vertices) {
-  // TODO (rsmith0x0): make this configurable.
   const int numThreadsPerBlock = THREADS_PER_BLOCK;
   const int numWarps = 455;
-  //      (rayBuffer.count() + WARP_BATCH_SIZE - 1) / WARP_BATCH_SIZE;
+  //      (numRays + WARP_BATCH_SIZE - 1) / WARP_BATCH_SIZE;
   const int numBlocks = (numWarps + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;
+
+  // Clear the device.  It is ours now.
+  CHK_CUDA(cudaDeviceReset());
+
+  // Load the scene.
+  loadScene();
+
+  // Allocate rays.
+  CHK_CUDA(cudaMalloc(&d_rays, sizeof(Ray) * numRays));
+
+  // Generate rays.
+  createRaysOrtho(&d_rays, &numRays);
+
+  // Allocate hits for results.
+  CHK_CUDA(cudaMalloc(&d_hits, sizeof(Hit) * numRays));
+  std::vector<Hit> initialHits(numRays);
+  const Hit badHit = {0.0f, -1, 0.0f, 0.0f};
+
+  // Initialize to non-hit.
+  for (int i = 0; i < numRays; ++i) initialHits[i] = badHit;
+  CHK_CUDA(cudaMemcpy(d_hits, &initialHits[0], sizeof(Hit) * numRays,
+                      cudaMemcpyHostToDevice));
+
   LOG(DEBUG) << "WARP_LOAD_FACTOR = " << WARP_LOAD_FACTOR
              << " WARPS_PER_BLOCK = " << WARPS_PER_BLOCK
-             << " numRays = " << rayBuffer.count() << " numWarps = " << numWarps
+             << " numRays = " << numRays << " numWarps = " << numWarps
              << " numThreadsPerBlock = " << numThreadsPerBlock
              << " numBlocks = " << numBlocks
              << " numThreads = " << numBlocks * THREADS_PER_BLOCK << "\n";
@@ -946,8 +1018,7 @@ void CUDAOctreeRenderer::traceOnDevice(int3** indices, float3** vertices) {
 #endif
 
   // OK, let's bind textures.
-  cudaBindTexture(0, texture_rays, rayBuffer.ptr(),
-                  rayBuffer.count() * sizeof(Ray));
+  cudaBindTexture(0, texture_rays, d_rays, numRays * sizeof(Ray));
   const NodeStorage<LAYOUT_SOA>* d_nodeStorage = d_octree->nodeStoragePtr();
   uint32_t numNodes = 0;
   CHK_CUDA(cudaMemcpy(&numNodes, &(d_nodeStorage->numNodes), sizeof(uint32_t),
@@ -985,10 +1056,10 @@ void CUDAOctreeRenderer::traceOnDevice(int3** indices, float3** vertices) {
   struct timespec start = getRealTime();
 
   traceKernel<<<numBlocks, numThreadsPerBlock>>>(
-      reinterpret_cast<float4*>(rayBuffer.ptr()), d_headers, d_footers,
+      reinterpret_cast<float4*>(d_rays), d_headers, d_footers,
       reinterpret_cast<float4*>(*vertices), reinterpret_cast<int4*>(*indices),
-      d_references, bounds, scene.numTriangles, scene.numVertices,
-      rayBuffer.count(), hitBuffer.ptr());
+      d_references, bounds, scene.numTriangles, scene.numVertices, numRays,
+      d_hits);
 
   cudaDeviceSynchronize();
   struct timespec end = getRealTime();
@@ -1000,10 +1071,10 @@ void CUDAOctreeRenderer::traceOnDevice(int3** indices, float3** vertices) {
              << " nsec.\n";
   LOG(DEBUG) << "Elapsed time = " << elapsed_microseconds << " microsec"
              << "," << elapsed_microseconds / 1000.0 << " millisec\n";
-  float ns_per_ray = 1000.0 * elapsed_microseconds / rayBuffer.count();
-  LOG(DEBUG) << "Traced " << rayBuffer.count() << " rays at " << ns_per_ray
+  float ns_per_ray = 1000.0 * elapsed_microseconds / numRays;
+  LOG(DEBUG) << "Traced " << numRays << " rays at " << ns_per_ray
              << " nanoseconds per ray\n";
-  float mrays_sec = rayBuffer.count() / elapsed_microseconds;
+  float mrays_sec = numRays / elapsed_microseconds;
   LOG(DEBUG) << "Rate is " << mrays_sec << " million rays per second.\n";
   Octree<LAYOUT_SOA>::freeOnGpu(d_octree);
   CHK_CUDA(cudaFree((void*)(d_octree)));
@@ -1011,8 +1082,7 @@ void CUDAOctreeRenderer::traceOnDevice(int3** indices, float3** vertices) {
 #endif
 #ifdef UPDATE_HITS_SOA
   LOG(DEBUG) << "Converting hits from SOA to AOS.\n";
-  reorderHitsKernel<<<numBlocks, numThreadsPerBlock>>>(hitBuffer.ptr(),
-                                                       rayBuffer.count());
+  reorderHitsKernel<<<numBlocks, numThreadsPerBlock>>>(d_hits, numRays);
   cudaDeviceSynchronize();
   LOG(DEBUG) << "SOA to AOS conversion done.\n";
 #endif
@@ -1024,6 +1094,46 @@ void CUDAOctreeRenderer::traceOnDevice(int3** indices, float3** vertices) {
   cudaReallocateAndAssignArray<float4, float3>((void**)vertices,
                                                scene.numVertices);
 #endif
+
+  // Copy hits locally.
+  localHits.resize(numRays);
+  CHK_CUDA(cudaMemcpy(&localHits[0], d_hits, sizeof(Hit) * numRays,
+                      cudaMemcpyDeviceToHost));
+
+  CHK_CUDA(cudaFree(d_hits));
+  CHK_CUDA(cudaFree(d_rays));
+
+  CHK_CUDA(cudaDeviceReset());
+}
+
+void CUDAOctreeRenderer::shade() {
+  image.resize();
+
+  float3 backgroundColor = {0.2f, 0.2f, 0.2f};
+
+  Hit* hits = &localHits[0];
+
+  for (size_t i = 0; i < numRays; i++) {
+    if (hits[i].triId < 0) {
+      image.pixel[i] = backgroundColor;
+    } else {
+      if (hits[i].triId > scene.numTriangles) {
+#if 0
+        std::cout << " Got out of bounds triangle ID: " << hits[i].triId << "\n";
+#endif
+        continue;
+      }
+      const int3 tri = scene.indices[hits[i].triId];
+      const float3 v0 = scene.vertices[tri.x];
+      const float3 v1 = scene.vertices[tri.y];
+      const float3 v2 = scene.vertices[tri.z];
+      const float3 e0 = v1 - v0;
+      const float3 e1 = v2 - v0;
+      const float3 n = normalize(cross(e0, e1));
+
+      image.pixel[i] = 0.5f * n + make_float3(0.5f, 0.5f, 0.5f);
+    }
+  }
 }
 
 }  // namespace oct
