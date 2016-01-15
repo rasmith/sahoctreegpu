@@ -16,8 +16,9 @@ find_package(GLUT REQUIRED)
 find_package(CUDA REQUIRED)
 include_directories(${CUDA_INCLUDE_DIRS}) 
 
-set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS};--keep;-G;-g;-lineinfo;-Xptxas;-v")
-#set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS};-Xptxas;-v")
+#set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS};--keep;-G;-g;-lineinfo;-Xptxas;-v")
+set(CUDA_NVCC_FLAGS 
+  "${CUDA_NVCC_FLAGS};-Xptxas;-v;--use_fast_math;-O3;-arch=sm_20")
 
 find_package(OptiX REQUIRED)
 include_directories(${OptiX_INCLUDE})

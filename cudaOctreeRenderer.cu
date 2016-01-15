@@ -869,6 +869,11 @@ void CUDAOctreeRenderer::render() {
   int3* d_indices;
   float3* d_vertices;
 
+  // Clear the device.  It is ours now.
+  CHK_CUDA(cudaDeviceReset());
+
+  loadScene();
+
   CHK_CUDA(cudaMalloc((void**)&d_indices, scene.numTriangles * sizeof(int3)));
   CHK_CUDA(
       cudaMalloc((void**)&d_vertices, scene.numTriangles * sizeof(float3)));
@@ -924,6 +929,8 @@ void CUDAOctreeRenderer::render() {
 
   cudaFree(d_indices);
   cudaFree(d_vertices);
+
+  CHK_CUDA(cudaDeviceReset());
 }
 
 void CUDAOctreeRenderer::buildOnDevice(Octree<LAYOUT_SOA>* d_octree) {}
@@ -962,12 +969,6 @@ void CUDAOctreeRenderer::traceOnDevice(int3** indices, float3** vertices) {
   const int numWarps = 455;
   //      (numRays + WARP_BATCH_SIZE - 1) / WARP_BATCH_SIZE;
   const int numBlocks = (numWarps + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;
-
-  // Clear the device.  It is ours now.
-  CHK_CUDA(cudaDeviceReset());
-
-  // Load the scene.
-  loadScene();
 
   // Allocate rays.
   CHK_CUDA(cudaMalloc(&d_rays, sizeof(Ray) * numRays));
