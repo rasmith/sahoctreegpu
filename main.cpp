@@ -43,23 +43,10 @@ void printUsageAndExit(const char* argv0) {
          "output.ppm)\n"
       << "  -w  | --width <number>         Specify output image width "
          "(default: 640)\n"
-      << "  -r  | --renderer <type>        Specify renderer type\n"
-      << "     renderer type:\n"
-      << "          cpu_rtp_simple  : simple ray tracing on CPU using RTP "
-         "(default)\n"
-      << "          gpu_rtp_simple  : simple ray tracing on GPU using RTP\n"
-      << "          gpu_cuda_simple : simple ray tracing on GPU using CUDA\n"
       << std::endl;
 
   exit(1);
 }
-
-enum RendererType {
-  CPU_RTP_SIMPLE,
-  GPU_RTP_SIMPLE,
-  GPU_CUDA_SIMPLE,
-  GPU_CUDA_OCTREE
-};
 
 void setupDevice(int* preferred) {
   int choices[8] = {0, 1, 2, 3, 4, 5, 6, 7};
@@ -121,7 +108,6 @@ void printDeviceInfo(int device) {
 int main(int argc, char** argv) {
   ConfigLoader config;
   BuildOptions buildOptions;
-  RendererType rtype = CPU_RTP_SIMPLE;
   char buildInputFile[2048];
   bool haveBuildInputFile = false;
   buildOptions.type = BuildOptions::BUILD_ON_DEVICE;
@@ -146,41 +132,16 @@ int main(int argc, char** argv) {
       haveBuildInputFile = true;
     } else if (arg == "--build-type" && i + 1 < argc) {
       BuildOptions::stringToBuildOptionType(argv[++i], &buildOptions.type);
-    } else if ((arg == "-r" || arg == "--renderer") && i + 1 < argc) {
-      std::cout << "Selecting renderer:";
-      std::string type(argv[++i]);
-      if (type.find("gpu_") == 0) {
-        config.contextType = RTP_CONTEXT_TYPE_CUDA;
-        config.bufferType = RTP_BUFFER_TYPE_CUDA_LINEAR;
-      } else {
-        config.contextType = RTP_CONTEXT_TYPE_CPU;
-        config.bufferType = RTP_BUFFER_TYPE_HOST;
-      }
-      if (type.compare("cpu_rtp_simple") == 0) {
-        std::cout << "cpu_rtp_simple\n";
-        rtype = CPU_RTP_SIMPLE;
-      } else if (type.compare("gpu_rtp_simple") == 0) {
-        std::cout << "gpu_rtp_simple\n";
-        rtype = GPU_RTP_SIMPLE;
-      } else if (type.compare("gpu_cuda_simple") == 0) {
-        std::cout << "gpu_cuda_simple\n";
-        rtype = GPU_CUDA_SIMPLE;
-      } else if (type.compare("gpu_cuda_octree") == 0) {
-        std::cout << "gpu_cuda_octree\n";
-        rtype = GPU_CUDA_OCTREE;
-      }
     } else {
       std::cerr << "Bad option: '" << arg << "'" << std::endl;
       printUsageAndExit(argv[0]);
     }
   }
 
-  if (rtype == GPU_CUDA_OCTREE || rtype == GPU_CUDA_SIMPLE) {
-    int device = 1;
-    setupDevice(&device);
-    std::cout << "Device = " << device << "\n";
-    printDeviceInfo(device);
-  }
+  int device = 1;
+  setupDevice(&device);
+  std::cout << "Device = " << device << "\n";
+  printDeviceInfo(device);
 
   if (!foundObj) {
     std::cerr << ".obj file not found\n";

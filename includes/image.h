@@ -3,7 +3,7 @@
 
 #include <vector>
 #include <string>
-#include <optixu/optixu_math.h>
+#include <vector_types.h>
 
 class Image {
 public:

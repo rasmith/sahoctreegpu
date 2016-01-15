@@ -4,29 +4,15 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include <vector_types.h>
 
-#include <optix_prime/optix_prime.h>
-
+#include "types.h"
 #include "image.h"
 #include "sceneLoader.h"
 #include "configLoader.h"
 #include "octree.h"
 
 namespace oct {
-
-struct Ray {
-  float3 origin;
-  float tmin;
-  float3 dir;
-  float tmax;
-};
-
-struct Hit {
-  float t;
-  int triId;
-  float u;
-  float v;
-};
 
 struct BuildOptions {
   enum BuildOptionType {

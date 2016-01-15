@@ -6,6 +6,7 @@
 
 #include "log.h"
 #include "octree.h"
+#include "cuda_math.h"
 
 #define kEpsilon 1e-18
 
@@ -24,7 +25,7 @@
 #define MAX_BLOCKS_PER_DIMENSION 65535
 //#define UPDATE_HITS_SOA
 
-#define WARP_LOAD_FACTOR 1  // This is effectively #rays / threads
+#define WARP_LOAD_FACTOR 2  // This is effectively #rays / threads
 #define WARP_BATCH_SIZE (WARP_LOAD_FACTOR * WARP_SIZE)  // #rays / warp batch
 __device__ int nextRayIndex;
 
@@ -804,9 +805,12 @@ __global__
 #ifdef USE_TRACE_KERNEL_LAUNCH_BOUNDS
     __launch_bounds__(THREADS_PER_BLOCK, MIN_BLOCKS)
 #endif
-        void traceKernel(const float4* rays, const uint32_t* headers,
-                         const uint2* footers, const float4* vertices,
-                         const int4* indices, const uint32_t* references,
+        void traceKernel(const __restrict__ float4* rays,
+                         const __restrict__ uint32_t* headers,
+                         const __restrict__ uint2* footers,
+                         const __restrict__ float4* vertices,
+                         const __restrict__ int4* indices,
+                         const __restrict__ uint32_t* references,
                          const Aabb4 bounds, uint32_t numTriangles,
                          uint32_t numVertices, uint32_t numRays, Hit* hits) {
   intersectOctree(rays, headers, footers, vertices, indices, references, bounds,
@@ -966,7 +970,7 @@ void CUDAOctreeRenderer::build(Octree<LAYOUT_SOA>* d_octree) {
 
 void CUDAOctreeRenderer::traceOnDevice(int3** indices, float3** vertices) {
   const int numThreadsPerBlock = THREADS_PER_BLOCK;
-  const int numWarps = 455;
+  const int numWarps = 200;
   //      (numRays + WARP_BATCH_SIZE - 1) / WARP_BATCH_SIZE;
   const int numBlocks = (numWarps + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;
 

@@ -1,7 +1,6 @@
 #ifndef CONFIG_LOADER_H_
 #define CONFIG_LOADER_H_
 
-#include <optix_prime/optix_prime.h>
 #include <string>
 
 class ConfigLoader {
@@ -9,14 +8,10 @@ class ConfigLoader {
   ConfigLoader()
       : objFilename("cow.obj"),
         imageFilename("output.ppm"),
-        imageWidth(640),
-        contextType(RTP_CONTEXT_TYPE_CPU),
-        bufferType(RTP_BUFFER_TYPE_HOST) {}
+        imageWidth(640) {}
   std::string objFilename;
   std::string imageFilename;
   int imageWidth;
-  RTPcontexttype contextType;
-  RTPbuffertype bufferType;
 };
 
 #endif

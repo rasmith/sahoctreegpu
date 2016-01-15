@@ -6,15 +6,10 @@
 #include <stdint.h>
 
 #include <nppdefs.h>
-#include <optix_prime/optix_prime.h>
-#include <optixu/optixu_aabb_namespace.h>
 
+#include "types.h"
 #include "log.h"
 #include "define.h"
-
-using optix::Aabb;
-using optix::float3;
-using optix::int3;
 
 namespace oct {
 

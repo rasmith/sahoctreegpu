@@ -1,8 +1,9 @@
 #ifndef SCENE_LOADER_H_
 #define SCENE_LOADER_H_
 
-#include <optixu/optixu_math.h>
 #include <string>
+#include <vector_types.h>
+#include <vector_functions.h>
 
 struct Scene {
   Scene()
