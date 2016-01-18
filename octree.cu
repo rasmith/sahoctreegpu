@@ -31,7 +31,7 @@ __host__ bool Octree<LAYOUT_AOS>::buildFromFile(const char *fileName) {
   m_nodeStorage.nodes =
       new NodeStorage<LAYOUT_AOS>::NodeType[m_nodeStorage.numNodes];
   in.read(reinterpret_cast<char *>(m_nodeStorage.nodes),
-          sizeof(NodeStorage<LAYOUT_AOS>::NodeType) * m_nodeStorage.numNodes);
+          sizeof(OctNode128) * m_nodeStorage.numNodes);
   m_triangleIndices = new uint32_t[m_numTriangleReferences];
   in.read(reinterpret_cast<char *>(m_triangleIndices),
           sizeof(uint32_t) * m_numTriangleReferences);

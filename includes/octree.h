@@ -66,12 +66,12 @@ struct OctNodeStorageTraits {
 
 template <>
 struct OctNodeStorageTraits<uint32_t> {
-  enum { BITS_CHILD_MASK= 8 };
+  enum { BITS_CHILD_MASK = 8 };
   enum { BITS_PER_DIMENSION = 6 };
   enum { BITS_SIZE_DESCRIPTOR = 6 };
   enum {
     BITS_UNUSED =
-        32 - BITS_CHILD_MASK- 3 * BITS_PER_DIMENSION - BITS_SIZE_DESCRIPTOR
+        32 - BITS_CHILD_MASK - 3 * BITS_PER_DIMENSION - BITS_SIZE_DESCRIPTOR
   };
 };
 
@@ -82,7 +82,7 @@ struct OctNodeStorageTraits<uint64_t> {
   enum { BITS_SIZE_DESCRIPTOR = 14 };
   enum {
     BITS_UNUSED =
-        64 - BITS_CHILD_MASK- 3 * BITS_PER_DIMENSION - BITS_SIZE_DESCRIPTOR
+        64 - BITS_CHILD_MASK - 3 * BITS_PER_DIMENSION - BITS_SIZE_DESCRIPTOR
   };
 };
 
@@ -131,7 +131,7 @@ struct OctNodeCompact {
   OctNodeHeader header;
   OctNodeFooter<StorageType> footer;
   Padding<BytesPadding> padding;
-  OctNodeCompact() {}
+  __host__ __device__ OctNodeCompact() {}
   OctNodeCompact(const OctNodeHeader &h, const OctNodeFooter<StorageType> &f)
       : header(h), footer(f) {}
   inline uint32_t samplesPerDimension() const {
@@ -176,6 +176,7 @@ inline std::ostream &operator<<(
 enum { PADDING_NONE = 0, PADDING_QUAD = 4 };
 
 typedef OctNodeCompact<uint64_t, PADDING_NONE> OctNode128;
+typedef OctNodeCompact<uint64_t, PADDING_NONE> OctNode128;
 
 enum Layout { LAYOUT_AOS, LAYOUT_SOA };
 
@@ -205,6 +206,10 @@ struct NodeStorage {
   void print(std::ostream &os) const {
     uint32_t count = (numNodes < 10 ? numNodes : 10);
     for (uint32_t i = 0; i < count; ++i) os << nodes[i] << "\n";
+  }
+  const OctNodeHeader &getHeader(uint32_t i) const { return nodes[i].header; }
+  const OctNodeFooter<uint64_t> &getFooter(uint32_t i) const {
+    return nodes[i].footer;
   }
 };
 
@@ -243,6 +248,10 @@ struct NodeStorage<LAYOUT_SOA> {
       os << node << "\n";
     }
   }
+  const OctNodeHeader &getHeader(uint32_t i) const { return headers[i]; }
+  const OctNodeFooter<uint64_t> &getFooter(uint32_t i) const {
+    return footers[i];
+  }
 };
 
 template <Layout LayoutType>
@@ -278,6 +287,66 @@ struct NodeStorageCopier<LAYOUT_SOA, LAYOUT_AOS> {
       dest->footers[i] = src->nodes[i].footer;
     }
     dest->numNodes = src->numNodes;
+  }
+};
+
+template <>
+struct NodeStorageCopier<LAYOUT_AOS, LAYOUT_AOS> {
+  void copy(NodeStorage<LAYOUT_AOS> *dest,
+            const NodeStorage<LAYOUT_AOS> *src) const {
+    if (dest->nodes != NULL) delete[] dest->nodes;
+    dest->nodes = new OctNode128[src->numNodes];
+    for (uint32_t i = 0; i < src->numNodes; ++i) dest->nodes[i] = src->nodes[i];
+    dest->numNodes = src->numNodes;
+  }
+  void copyToGpu(NodeStorage<LAYOUT_AOS> *d_dest,
+                 const NodeStorage<LAYOUT_AOS> *src) {
+    LOG(DEBUG) << "copyToGpu: d_dest = " << d_dest << " src = " << src << "\n";
+    LOG(DEBUG) << "copyToGpu: numNodes = " << src->numNodes << "\n";
+    LOG(DEBUG) << "copyToGpu: nodes bytes = "
+               << sizeof(OctNode128) * src->numNodes << "\n";
+    size_t freeMemory = 0;
+    size_t totalMemory = 0;
+    CHK_CUDA(cudaMemGetInfo(&freeMemory, &totalMemory));
+    LOG(DEBUG) << "copyToGpu: Free memory = " << freeMemory
+               << " totalMemory = " << totalMemory << "\n";
+    // Copy the nodes.
+    OctNode128 *d_nodes = NULL;
+    CHK_CUDA(cudaMalloc((void **)(&d_nodes),
+                        src->numNodes * sizeof(OctNode128)));
+    CHK_CUDA(cudaMemcpy((void *)(d_nodes), (const void *)(src->nodes),
+                        src->numNodes * sizeof(OctNode128),
+                        cudaMemcpyHostToDevice));
+    CHK_CUDA(cudaMemcpy((void *)(&(d_dest->nodes)),
+                        (const void *)(&d_nodes), sizeof(OctNode128 *),
+                        cudaMemcpyHostToDevice));
+
+    // Copy the number of nodes.
+    CHK_CUDA(cudaMemcpy((void *)(&(d_dest->numNodes)),
+                        (const void *)(&src->numNodes), sizeof(uint32_t),
+                        cudaMemcpyHostToDevice));
+  }
+
+  void copyFromGpu(NodeStorage<LAYOUT_AOS> *dest,
+                   const NodeStorage<LAYOUT_AOS> *d_src) {
+    LOG(DEBUG) << "NodeStorage<LAYOUT_AOS>::copyFromGpu\n";
+    LOG(DEBUG) << "Copy the number of nodes.\n";
+    // Copy the number of nodes.
+    CHK_CUDA(cudaMemcpy((void *)(&(dest->numNodes)),
+                        (const void *)(&(d_src->numNodes)), sizeof(uint32_t),
+                        cudaMemcpyDeviceToHost));
+    LOG(DEBUG) << "Number of nodes = " << dest->numNodes << "\n";
+
+    // Copy the nodes.
+    LOG(DEBUG) << "Copy the nodes.\n";
+    OctNode128 *d_nodes = NULL;
+    if (dest->nodes) delete[] dest->nodes;
+    dest->nodes = new OctNode128[dest->numNodes];
+    CHK_CUDA(cudaMemcpy((void *)(&d_nodes), (const void *)(&(d_src->nodes)),
+                        sizeof(OctNodeHeader *), cudaMemcpyDeviceToHost));
+    CHK_CUDA(cudaMemcpy((void *)(dest->nodes), (const void *)(d_nodes),
+                        dest->numNodes * sizeof(OctNode128),
+                        cudaMemcpyDeviceToHost));
   }
 };
 
@@ -451,16 +520,14 @@ class Octree {
     m_indices = octree.indices();
     m_numTriangles = octree.numTriangles();
     m_numVertices = octree.numVertices();
-    if (NodeLayout == LAYOUT_SOA) {
-      uint32_t nodeCount =
-          (m_nodeStorage.numNodes < 10 ? m_nodeStorage.numNodes : 10);
-      LOG(DEBUG) << "numNodes = " << m_nodeStorage.numNodes << "\n";
-      for (int i = 0; i < nodeCount; ++i) {
-        OctNode128 node;
-        node.footer = m_nodeStorage.footers[i];
-        node.header = m_nodeStorage.headers[i];
-        LOG(DEBUG) << node << "\n";
-      }
+    uint32_t nodeCount =
+        (m_nodeStorage.numNodes < 10 ? m_nodeStorage.numNodes : 10);
+    LOG(DEBUG) << "numNodes = " << m_nodeStorage.numNodes << "\n";
+    for (int i = 0; i < nodeCount; ++i) {
+      OctNode128 node;
+      node.footer = m_nodeStorage.getFooter(i);
+      node.header = m_nodeStorage.getHeader(i);
+      LOG(DEBUG) << node << "\n";
     }
     return true;
   }

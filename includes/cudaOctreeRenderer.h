@@ -48,9 +48,9 @@ class CUDAOctreeRenderer {
   CUDAOctreeRenderer(const ConfigLoader& c, const BuildOptions& options);
   virtual ~CUDAOctreeRenderer() {}
   void render();
-  void build(Octree<LAYOUT_SOA>* d_octree);
-  void buildOnDevice(Octree<LAYOUT_SOA>* d_octree);
-  void buildFromFile(Octree<LAYOUT_SOA>* d_octree);
+  void build(Octree<LAYOUT_AOS>* d_octree);
+  void buildOnDevice(Octree<LAYOUT_AOS>* d_octree);
+  void buildFromFile(Octree<LAYOUT_AOS>* d_octree);
   inline void setBuildOption(const BuildOptions& options) {
     buildOptions = options;
   }

@@ -33,8 +33,7 @@ __device__ int nextRayIndex;
 
 //#define USE_TRACE_KERNEL_LAUNCH_BOUNDS
 texture<float4, 1, cudaReadModeElementType> texture_rays;
-texture<uint32_t, 1, cudaReadModeElementType> texture_headers;
-texture<uint2, 1, cudaReadModeElementType> texture_footers;
+texture<uint4, 1, cudaReadModeElementType> texture_nodes;
 texture<float4, 1, cudaReadModeElementType> texture_vertices;
 texture<int4, 1, cudaReadModeElementType> texture_indices;
 texture<uint32_t, 1, cudaReadModeElementType> texture_references;
@@ -480,35 +479,20 @@ inline __host__ __device__ __host__ void createEvents0(
       events[0].mask ^ (((k + 1) + 2 > 2 && events[0].t == events[1].t) * mask);
 }
 
-inline float4 __device__ __host__
-getSplitPoint(const OctNodeHeader* header,
-              const OctNodeFooter<uint64_t>* footer, const Aabb4& bounds) {
+inline float4 __device__ __host__ getSplitPoint(const OctNode128* node,
+                                                const Aabb4& bounds) {
   const float4& min = bounds.min;
   const float4& max = bounds.max;
-  uint16_t num_samples = footer->internal.sizeDescriptor;
+  uint16_t num_samples = node->footer.internal.sizeDescriptor;
   if (num_samples <= 1) return 0.5f * (min + max);
   float inv = 1.0 / (num_samples - 1);
   float4 step_size = inv * (max - min);
-  float4 split_point = make_float4(footer->internal.i, footer->internal.j,
-                                   footer->internal.k, 0.0f);
+  float4 split_point =
+      make_float4(node->footer.internal.i, node->footer.internal.j,
+                  node->footer.internal.k, 0.0f);
   split_point *= step_size;
   split_point += min;
   return split_point;
-}
-
-inline __device__ void getChildren(const OctNodeHeader* header,
-                                   const OctNodeFooter<uint64_t>* footer,
-                                   const OctNodeHeader* headers,
-                                   uint32_t* children,
-                                   unsigned char* hasChildBitmask) {
-  unsigned char childMask = footer->internal.childMask;
-  uint32_t offset = static_cast<uint32_t>(header->offset);
-  uint32_t childId = offset;
-  for (uint16_t i = 0; i < 8; ++i) {
-    children[i] = childId;
-    childId += ((childMask >> i) & 0x1);
-  }
-  *hasChildBitmask = childMask;
 }
 
 //#define DEBUG_TRAVERSE
@@ -524,10 +508,9 @@ inline __device__ void getChildren(const OctNodeHeader* header,
 
 #endif
 inline __device__ void intersectOctree(
-    const float4* rays, const uint32_t* headers, const uint2* footers,
-    const float4* vertices, const int4* indices, const uint32_t* references,
-    const Aabb4 bounds, uint32_t numTriangles, uint32_t numVertices,
-    uint32_t numRays, Hit* hits) {
+    const float4* rays, const uint4* nodes, const float4* vertices,
+    const int4* indices, const uint32_t* references, const Aabb4 bounds,
+    uint32_t numTriangles, uint32_t numVertices, uint32_t numRays, Hit* hits) {
   // NOTE:
   //    1) We need to examine 4 nodes per octree node.
   //    4) Because of (1), we create a stack of size:
@@ -607,15 +590,12 @@ inline __device__ void intersectOctree(
       // Setup beore entering loop.
       stackEmpty = (stackEnd <= 0);
       currentId = nodeIdStack[!stackEmpty * (stackEnd - 1)];
-      OctNodeHeader currentHeader;
-      OctNodeFooter<uint64_t> currentFooter;
+      OctNode128 currentNode;
       if (!stackEmpty) {
-        *reinterpret_cast<uint32_t*>(&currentHeader) =
-            tex1Dfetch(texture_headers, currentId);
-        *reinterpret_cast<uint2*>(&currentFooter) =
-            tex1Dfetch(texture_footers, currentId);
+        *reinterpret_cast<uint4*>(&currentNode) =
+            tex1Dfetch(texture_nodes, currentId);
       }
-      bool foundLeaf = (currentHeader.type == NODE_LEAF);
+      bool foundLeaf = (currentNode.header.type == NODE_LEAF);
       tNear = !stackEmpty * tNearStack[!stackEmpty * (stackEnd - 1)];
       tFar = !stackEmpty * tFarStack[!stackEmpty * (stackEnd - 1)];
 
@@ -627,8 +607,7 @@ inline __device__ void intersectOctree(
         float4 hit =
             make_float4(origin.x + tNear * dir.x, origin.y + tNear * dir.y,
                         origin.z + tNear * dir.z, 0.0f);
-        float4 center =
-            getSplitPoint(&currentHeader, &currentFooter, currentBounds);
+        float4 center = getSplitPoint(&currentNode, currentBounds);
 
         //  Get the events, in order of they are hit.
         int16_t numEvents = 0;
@@ -640,9 +619,9 @@ inline __device__ void intersectOctree(
 
         // Get children.
         uint32_t children[8];
-        uint32_t childId = currentHeader.offset;
-        octantBits = currentFooter.internal.childMask;
-        #pragma unroll
+        uint32_t childId = currentNode.header.offset;
+        octantBits = currentNode.footer.internal.childMask;
+#pragma unroll
         for (int i = 0; i < 8; ++i) {
           children[i] = childId;
           childId += ((octantBits >> i) & 0x1);
@@ -680,19 +659,17 @@ inline __device__ void intersectOctree(
         stackEmpty = (stackEnd <= 0);
         currentId = nodeIdStack[!stackEmpty * (stackEnd - 1)];
         if (!stackEmpty) {
-          *reinterpret_cast<uint32_t*>(&currentHeader) =
-              tex1Dfetch(texture_headers, currentId);
-          *reinterpret_cast<uint2*>(&currentFooter) =
-              tex1Dfetch(texture_footers, currentId);
+          *reinterpret_cast<uint4*>(&currentNode) =
+              tex1Dfetch(texture_nodes, currentId);
         }
-        foundLeaf = (currentHeader.type == NODE_LEAF);
+        foundLeaf = (currentNode.header.type == NODE_LEAF);
         tNear = !stackEmpty * tNearStack[!stackEmpty * (stackEnd - 1)];
         tFar = !stackEmpty * tFarStack[!stackEmpty * (stackEnd - 1)];
       }  // end of while (!foundLeaf && !stackEmpty)
 
       // We either have a leaf or stack is empty.
-      uint32_t numPrimitives = !stackEmpty * currentFooter.leaf.size;
-      uint32_t offset = !stackEmpty * currentHeader.offset;
+      uint32_t numPrimitives = !stackEmpty * currentNode.footer.leaf.size;
+      uint32_t offset = !stackEmpty * currentNode.header.offset;
       bool triangleHit = false;
 
       for (uint32_t i = 0; i < numPrimitives; ++i) {
@@ -724,14 +701,13 @@ __global__
     __launch_bounds__(THREADS_PER_BLOCK, MIN_BLOCKS)
 #endif
         void traceKernel(const __restrict__ float4* rays,
-                         const __restrict__ uint32_t* headers,
-                         const __restrict__ uint2* footers,
+                         const __restrict__ uint4* nodes,
                          const __restrict__ float4* vertices,
                          const __restrict__ int4* indices,
                          const __restrict__ uint32_t* references,
                          const Aabb4 bounds, uint32_t numTriangles,
                          uint32_t numVertices, uint32_t numRays, Hit* hits) {
-  intersectOctree(rays, headers, footers, vertices, indices, references, bounds,
+  intersectOctree(rays, nodes, vertices, indices, references, bounds,
                   numTriangles, numVertices, numRays, hits);
 }
 
@@ -823,25 +799,25 @@ void CUDAOctreeRenderer::render() {
   CHK_CUDA(cudaDeviceReset());
 }
 
-void CUDAOctreeRenderer::buildOnDevice(Octree<LAYOUT_SOA>* d_octree) {}
+void CUDAOctreeRenderer::buildOnDevice(Octree<LAYOUT_AOS>* d_octree) {}
 
-//#define DEBUG_CHECK_FILE_OCTREE
-void CUDAOctreeRenderer::buildFromFile(Octree<LAYOUT_SOA>* d_octree) {
+#define DEBUG_CHECK_FILE_OCTREE
+void CUDAOctreeRenderer::buildFromFile(Octree<LAYOUT_AOS>* d_octree) {
   Octree<LAYOUT_AOS> octreeFileAos;
   LOG(DEBUG) << "Building from: " << buildOptions.info << "\n";
   octreeFileAos.buildFromFile(buildOptions.info);
   octreeFileAos.setGeometry(NULL, NULL, scene.numTriangles, scene.numVertices);
-  Octree<LAYOUT_SOA> octreeFileSoa;
+  Octree<LAYOUT_AOS> octreeFileSoa;
   octreeFileSoa.copy(octreeFileAos);
   octreeFileSoa.copyToGpu(d_octree);
 #ifdef DEBUG_CHECK_FILE_OCTREE
-  Octree<LAYOUT_SOA> octreeFileSoaCheck;
+  Octree<LAYOUT_AOS> octreeFileSoaCheck;
   octreeFileSoaCheck.copyFromGpu(d_octree);
   LOG(DEBUG) << octreeFileSoaCheck << "\n";
 #endif
 }
 
-void CUDAOctreeRenderer::build(Octree<LAYOUT_SOA>* d_octree) {
+void CUDAOctreeRenderer::build(Octree<LAYOUT_AOS>* d_octree) {
   switch (buildOptions.type) {
     case BuildOptions::BUILD_FROM_FILE:
       buildFromFile(d_octree);
@@ -862,7 +838,7 @@ void CUDAOctreeRenderer::traceOnDevice(int4* indices, float4* vertices) {
 
   //      (numRays + WARP_BATCH_SIZE - 1) / WARP_BATCH_SIZE;
   const int numBlocks = (numWarps + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;
-    
+
   // Allocate rays.
   CHK_CUDA(cudaMalloc(&d_rays, sizeof(Ray) * numRays));
 
@@ -886,8 +862,8 @@ void CUDAOctreeRenderer::traceOnDevice(int4* indices, float4* vertices) {
              << " numBlocks = " << numBlocks
              << " numThreads = " << numBlocks * THREADS_PER_BLOCK << "\n";
 
-  Octree<LAYOUT_SOA>* d_octree = NULL;
-  CHK_CUDA(cudaMalloc((void**)(&d_octree), sizeof(Octree<LAYOUT_SOA>)));
+  Octree<LAYOUT_AOS>* d_octree = NULL;
+  CHK_CUDA(cudaMalloc((void**)(&d_octree), sizeof(Octree<LAYOUT_AOS>)));
 
   build(d_octree);
 
@@ -898,21 +874,16 @@ void CUDAOctreeRenderer::traceOnDevice(int4* indices, float4* vertices) {
 
   // OK, let's bind textures.
   cudaBindTexture(0, texture_rays, d_rays, numRays * sizeof(Ray));
-  const NodeStorage<LAYOUT_SOA>* d_nodeStorage = d_octree->nodeStoragePtr();
+  const NodeStorage<LAYOUT_AOS>* d_nodeStorage = d_octree->nodeStoragePtr();
   uint32_t numNodes = 0;
   CHK_CUDA(cudaMemcpy(&numNodes, &(d_nodeStorage->numNodes), sizeof(uint32_t),
                       cudaMemcpyDeviceToHost));
   LOG(DEBUG) << "numNodes = " << numNodes << "\n";
-  uint2* d_footers;
-  CHK_CUDA(cudaMemcpy(&d_footers, &(d_nodeStorage->footers),
-                      sizeof(OctNodeFooter<uint64_t>*), cudaMemcpyDeviceToHost))
-  cudaBindTexture(0, texture_footers, d_footers,
-                  sizeof(OctNodeFooter<uint64_t>) * numNodes);
-  uint32_t* d_headers;
-  CHK_CUDA(cudaMemcpy(&d_headers, &(d_nodeStorage->headers),
-                      sizeof(OctNodeHeader*), cudaMemcpyDeviceToHost))
-  cudaBindTexture(0, texture_headers, d_headers,
-                  sizeof(OctNodeHeader) * numNodes);
+  uint4* d_nodes;
+  CHK_CUDA(cudaMemcpy(&d_nodes, &(d_nodeStorage->nodes),
+                      sizeof(OctNode128*), cudaMemcpyDeviceToHost))
+  cudaBindTexture(0, texture_nodes, d_nodes,
+                  sizeof(OctNode128) * numNodes);
   cudaBindTexture(0, texture_vertices, vertices,
                   scene.numVertices * sizeof(float4));
   cudaBindTexture(0, texture_indices, indices,
@@ -938,22 +909,22 @@ void CUDAOctreeRenderer::traceOnDevice(int4* indices, float4* vertices) {
   CHK_CUDA(cudaEventCreate(&stop_event));
   CHK_CUDA(cudaEventRecord(start_event, 0));
   traceKernel<<<numBlocks, numThreadsPerBlock>>>(
-      reinterpret_cast<float4*>(d_rays), d_headers, d_footers, vertices,
-      indices, d_references, bounds, scene.numTriangles, scene.numVertices,
-      numRays, d_hits);
+      reinterpret_cast<float4*>(d_rays), d_nodes, vertices, indices,
+      d_references, bounds, scene.numTriangles, scene.numVertices, numRays,
+      d_hits);
   CHK_CUDA(cudaEventRecord(stop_event, 0));
   CHK_CUDA(cudaEventSynchronize(stop_event));
   cudaEventElapsedTime(&time, start_event, stop_event);
 
   LOG(DEBUG) << "Done...\n";
   LOG(DEBUG) << "Elapsed time = " << time * 1000.0 << " microsec"
-             << ", " << time  << " millisec\n";
+             << ", " << time << " millisec\n";
   float ns_per_ray = 1000000.0 * time / numRays;
   LOG(DEBUG) << "Traced " << numRays << " rays at " << ns_per_ray
              << " nanoseconds per ray\n";
   float mrays_sec = numRays / (1000.0 * time);
   LOG(DEBUG) << "Rate is " << mrays_sec << " million rays per second.\n";
-  Octree<LAYOUT_SOA>::freeOnGpu(d_octree);
+  Octree<LAYOUT_AOS>::freeOnGpu(d_octree);
   CHK_CUDA(cudaFree((void*)(d_octree)));
 #ifdef UPDATE_HITS_SOA
   LOG(DEBUG) << "Converting hits from SOA to AOS.\n";
