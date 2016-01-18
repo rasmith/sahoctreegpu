@@ -501,21 +501,14 @@ inline __device__ void getChildren(const OctNodeHeader* header,
                                    const OctNodeHeader* headers,
                                    uint32_t* children,
                                    unsigned char* hasChildBitmask) {
-  uint16_t numChildren =
-      static_cast<uint16_t>(footer->internal.numChildren) + 1;
+  unsigned char childMask = footer->internal.childMask;
   uint32_t offset = static_cast<uint32_t>(header->offset);
-  unsigned char maskResult = 0x0;
-  uint32_t childId = 0;
-  OctNodeHeader childHeader;
-  for (uint16_t i = 0; i < numChildren; ++i) {
-    childId = offset + i;
-    *reinterpret_cast<uint32_t*>(&childHeader) =
-        tex1Dfetch(texture_headers, childId);
-    /*childHeader = headers[childId];*/
-    children[childHeader.octant] = childId;
-    maskResult |= (0x1 << childHeader.octant);
+  uint32_t childId = offset;
+  for (uint16_t i = 0; i < 8; ++i) {
+    children[i] = childId;
+    childId += ((childMask >> i) & 0x1);
   }
-  *hasChildBitmask = maskResult;
+  *hasChildBitmask = childMask;
 }
 
 //#define DEBUG_TRAVERSE
@@ -647,9 +640,13 @@ inline __device__ void intersectOctree(
 
         // Get children.
         uint32_t children[8];
-        getChildren(&currentHeader, &currentFooter,
-                    reinterpret_cast<const OctNodeHeader*>(headers), children,
-                    &octantBits);
+        uint32_t childId = currentHeader.offset;
+        octantBits = currentFooter.internal.childMask;
+        #pragma unroll
+        for (int i = 0; i < 8; ++i) {
+          children[i] = childId;
+          childId += ((octantBits >> i) & 0x1);
+        }
 
         // Figure which octants were hit are non-empty.
         unsigned char octant = 0x0;

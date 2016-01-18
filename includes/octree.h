@@ -45,6 +45,12 @@ inline bool compareBits<0>(const unsigned char *a, const unsigned char *b) {
   return true;
 }
 
+inline uint32_t countBits(unsigned char c) {
+  return (c & 0x1) + ((c & 0x2) >> 1) + ((c & 0x4) >> 2) + ((c & 0x8) >> 3) +
+         ((c & 0x10) >> 4) + ((c & 0x20) >> 5) + ((c & 0x40) >> 6) +
+         ((c & 0x80) >> 7);
+}
+
 ////////////////////////////////////
 //
 // Compact Layout
@@ -52,7 +58,7 @@ inline bool compareBits<0>(const unsigned char *a, const unsigned char *b) {
 ////////////////////////////////////
 template <typename StorageType>
 struct OctNodeStorageTraits {
-  enum { BITS_NUM_CHILDREN };
+  enum { BITS_CHILD_MASK };
   enum { BITS_PER_DIMENSION };
   enum { BITS_SIZE_DESCRIPTOR };
   enum { BITS_UNUSED };
@@ -60,23 +66,23 @@ struct OctNodeStorageTraits {
 
 template <>
 struct OctNodeStorageTraits<uint32_t> {
-  enum { BITS_NUM_CHILDREN = 3 };
-  enum { BITS_PER_DIMENSION = 8 };
-  enum { BITS_SIZE_DESCRIPTOR = 8 };
+  enum { BITS_CHILD_MASK= 8 };
+  enum { BITS_PER_DIMENSION = 6 };
+  enum { BITS_SIZE_DESCRIPTOR = 6 };
   enum {
     BITS_UNUSED =
-        32 - BITS_NUM_CHILDREN - 3 * BITS_PER_DIMENSION - BITS_SIZE_DESCRIPTOR
+        32 - BITS_CHILD_MASK- 3 * BITS_PER_DIMENSION - BITS_SIZE_DESCRIPTOR
   };
 };
 
 template <>
 struct OctNodeStorageTraits<uint64_t> {
-  enum { BITS_NUM_CHILDREN = 3 };
-  enum { BITS_PER_DIMENSION = 15 };
-  enum { BITS_SIZE_DESCRIPTOR = 15 };
+  enum { BITS_CHILD_MASK = 8 };
+  enum { BITS_PER_DIMENSION = 14 };
+  enum { BITS_SIZE_DESCRIPTOR = 14 };
   enum {
     BITS_UNUSED =
-        64 - BITS_NUM_CHILDREN - 3 * BITS_PER_DIMENSION - BITS_SIZE_DESCRIPTOR
+        64 - BITS_CHILD_MASK- 3 * BITS_PER_DIMENSION - BITS_SIZE_DESCRIPTOR
   };
 };
 
@@ -107,12 +113,11 @@ struct OctNodeFooter {
   typedef OctNodeStorageTraits<StorageType> StorageTraits;
   union {
     struct {
-      StorageType numChildren : StorageTraits::BITS_NUM_CHILDREN;
+      StorageType childMask : StorageTraits::BITS_CHILD_MASK;
       StorageType i : StorageTraits::BITS_PER_DIMENSION;
       StorageType j : StorageTraits::BITS_PER_DIMENSION;
       StorageType k : StorageTraits::BITS_PER_DIMENSION;
       StorageType sizeDescriptor : StorageTraits::BITS_SIZE_DESCRIPTOR;
-      StorageType unused : StorageTraits::BITS_UNUSED;
     } internal;
     struct {
       StorageType size;
@@ -136,7 +141,7 @@ struct OctNodeCompact {
   __host__ void print(std::ostream &os) const {
     if (header.type == NODE_INTERNAL) {
       os << "[N @" << header.octant << " +" << header.offset << " "
-         << "#" << footer.internal.numChildren << " "
+         << "#" << countBits(footer.internal.childMask) << " "
          << "i:" << footer.internal.i << " "
          << "j:" << footer.internal.j << " "
          << "k:" << footer.internal.k << " "

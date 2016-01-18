@@ -138,7 +138,7 @@ int main(int argc, char** argv) {
     }
   }
 
-  int device = 1;
+  int device = 0;
   setupDevice(&device);
   std::cout << "Device = " << device << "\n";
   printDeviceInfo(device);
