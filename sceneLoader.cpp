@@ -18,18 +18,24 @@ void SceneLoader::load(Scene* scene) {
   assert(model != NULL);
 
   // Load vertices.
-  scene->vertices = new float3[model->numvertices];
+  scene->vertices = new float4[model->numvertices];
   assert(scene->vertices != NULL);
-  memcpy(&scene->vertices[0], model->vertices + 3,
-         sizeof(float) * 3 * model->numvertices);
+  for (int i = 0; i < model->numvertices; ++i) {
+    scene->vertices[i].x = model->vertices[3 * (i + 1)];
+    scene->vertices[i].y = model->vertices[3 * (i + 1) + 1];
+    scene->vertices[i].z = model->vertices[3 * (i + 1) + 2];
+    scene->vertices[i].w = 0.0f;
+  }
+
 
   // Load indices.
-  scene->indices = new int3[model->numtriangles];
+  scene->indices = new int4[model->numtriangles];
   assert(scene->indices != NULL);
   for (int i = 0; i < model->numtriangles; ++i) {
     scene->indices[i].x = model->triangles[i].vindices[0] - 1;
     scene->indices[i].y = model->triangles[i].vindices[1] - 1;
     scene->indices[i].z = model->triangles[i].vindices[2] - 1;
+    scene->indices[i].w = 0;
   }
 
   scene->numTriangles = model->numtriangles;

@@ -63,7 +63,7 @@ class CUDAOctreeRenderer {
                                int yOffset, int yStride, float4* d_rays);
   inline int idivCeil(int x, int y) { return (x + y - 1) / y; }
   void loadScene();
-  void traceOnDevice(int3** indices, float3** vertices);
+  void traceOnDevice(int4* indices, float4* vertices);
 
   ConfigLoader config;
   BuildOptions buildOptions;

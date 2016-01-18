@@ -16,8 +16,8 @@ struct Scene {
   ~Scene();
   int numTriangles;
   int numVertices;
-  int3* indices;
-  float3* vertices;
+  int4* indices;
+  float4* vertices;
   float3 bbmin;
   float3 bbmax;
 };

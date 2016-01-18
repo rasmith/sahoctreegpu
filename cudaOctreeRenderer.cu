@@ -1,5 +1,7 @@
 #include "cudaOctreeRenderer.h"
 
+#include <cuda.h>
+#include <cuda_runtime_api.h>
 #include <nppdefs.h>
 #include <float.h>
 #include <sys/time.h>
@@ -25,13 +27,11 @@
 #define MAX_BLOCKS_PER_DIMENSION 65535
 //#define UPDATE_HITS_SOA
 
-#define WARP_LOAD_FACTOR 2  // This is effectively #rays / threads
+#define WARP_LOAD_FACTOR 1  // This is effectively #rays / threads
 #define WARP_BATCH_SIZE (WARP_LOAD_FACTOR * WARP_SIZE)  // #rays / warp batch
 __device__ int nextRayIndex;
 
 //#define USE_TRACE_KERNEL_LAUNCH_BOUNDS
-//#define REMAP_INDICES_SOA
-//#define REMAP_VERTICES_SOA
 texture<float4, 1, cudaReadModeElementType> texture_rays;
 texture<uint32_t, 1, cudaReadModeElementType> texture_headers;
 texture<uint2, 1, cudaReadModeElementType> texture_footers;
@@ -87,13 +87,10 @@ std::ostream& operator<<(std::ostream& os, const int3& x) {
 }
 
 std::ostream& operator<<(std::ostream& os, const Ray& r) {
-  os << "o = " << r.origin << " tmin = " << r.tmin << " d = " << r.dir
+  float3 origin = make_float3(r.ox, r.oy, r.oz);
+  float3 dir = make_float3(r.dx, r.dy, r.dz);
+  os << "o = " << origin << " tmin = " << r.tmin << " d = " << dir
      << " tmax = " << r.tmax;
-  return os;
-}
-
-std::ostream& operator<<(std::ostream& os, const Ray4& r) {
-  os << "o = " << r.origin << " d = " << r.dir;
   return os;
 }
 
@@ -140,50 +137,6 @@ void __host__ __device__ assign<int4, int3>(const int4& source, int3* dest) {
   dest->x = source.x;
   dest->y = source.y;
   dest->z = source.z;
-}
-
-template <>
-void __host__ __device__ assign<Ray, Ray4>(const Ray& source, Ray4* dest) {
-  assign(source.origin, &dest->origin);
-  //  dest->tmin = source.tmin;
-  assign(source.dir, &dest->dir);
-  // dest->tmax = source.tmax;
-}
-
-template <>
-void __host__ __device__ assign<Ray4, Ray>(const Ray4& source, Ray* dest) {
-  assign(source.origin, &dest->origin);
-  dest->tmin = 0.0;  // source.tmin;
-  assign(source.dir, &dest->dir);
-  dest->tmax = NPP_MAXABS_32F;  // source.tmax;
-}
-
-template <typename SourceType, typename DestinationType>
-void cudaReallocateAndAssignArray(void** d_pointer, int count) {
-  DestinationType* dest = new DestinationType[count];
-  SourceType* source = new SourceType[count];
-  CHK_CUDA(cudaMemcpy(source, *d_pointer, sizeof(SourceType) * count,
-                      cudaMemcpyDeviceToHost));
-  CHK_CUDA(cudaFree(*d_pointer));
-#if 0
-  for (int i = 0; i < 10; ++i)
-    std::cout << "source[" << i << "]" << source[i] << "\n";
-#endif
-  for (int i = 0; i < count; ++i) assign(source[i], &dest[i]);
-  CHK_CUDA(cudaMalloc(d_pointer, sizeof(DestinationType) * count));
-  CHK_CUDA(cudaMemcpy(*d_pointer, dest, sizeof(DestinationType) * count,
-                      cudaMemcpyHostToDevice));
-#if 0
-  uint32_t checkCount = (count < 10 ? count : 10);
-  DestinationType* check = new DestinationType[checkCount];
-  CHK_CUDA(cudaMemcpy(check, *d_pointer, sizeof(DestinationType) * checkCount,
-                      cudaMemcpyDeviceToHost));
-  for (int i = 0; i < checkCount; ++i)
-    std::cout << "check[" << i << "]" << check[i] << "\n";
-  delete[] check;
-#endif
-  delete[] dest;
-  delete[] source;
 }
 
 struct timespec getRealTime() {
@@ -353,24 +306,24 @@ __device__ __inline__ float max4(float a, float b, float c, float d) {
   return fmaxf(fmaxf(fmaxf(a, b), c), d);
 }
 
-inline __device__ bool intersectAabb2(const float3* origin,
+inline __device__ bool intersectAabb2(const float4& origin,
                                       const float4& invDirection,
                                       const Aabb4& bounds, float t0, float t1,
                                       float* tNear, float* tFar) {
   const float4 ood =
-      make_float4(origin->x * invDirection.x, origin->y * invDirection.y,
-                  origin->z * invDirection.z, 0.0f);
+      make_float4(origin.x * invDirection.x, origin.y * invDirection.y,
+                  origin.z * invDirection.z, 0.0f);
   const float4& min_bounds = bounds.min;
   const float4& max_bounds = bounds.max;
   float4 min_bounds_diff =
-      make_float4(min_bounds.x - origin->x, min_bounds.y - origin->y,
-                  min_bounds.z - origin->z, 0.0f);
+      make_float4(min_bounds.x - origin.x, min_bounds.y - origin.y,
+                  min_bounds.z - origin.z, 0.0f);
   float4 tmins = make_float4(min_bounds_diff.x * invDirection.x,
                              min_bounds_diff.y * invDirection.y,
                              min_bounds_diff.z * invDirection.z, 0.0f);
   float4 max_bounds_diff =
-      make_float4(max_bounds.x - origin->x, max_bounds.y - origin->y,
-                  max_bounds.z - origin->z, 0.0f);
+      make_float4(max_bounds.x - origin.x, max_bounds.y - origin.y,
+                  max_bounds.z - origin.z, 0.0f);
   float4 tmaxs = make_float4(max_bounds_diff.x * invDirection.x,
                              max_bounds_diff.y * invDirection.y,
                              max_bounds_diff.z * invDirection.z, 0.0f);
@@ -385,60 +338,31 @@ inline __device__ bool intersectAabb2(const float3* origin,
 }
 
 #define DIVERGENCE_FREE_INSTERSECT_TRIANGLE
-inline __device__ bool intersectTriangle(const Ray* ray, const int4* indices,
-                                         const float4* vertices,
-                                         const int triId, Hit& isect,
-                                         int numTriangles, int numVertices) {
-#ifdef REMAP_INDICES_SOA
-  const int* a_indices = reinterpret_cast<const int*>(indices);
-  const int* b_indices = a_indices + numTriangles;
-  const int* c_indices = b_indices + numTriangles;
-  const int& trix = a_indices[triId];
-  const int& triy = b_indices[triId];
-  const int& triz = c_indices[triId];
-#else
+inline __device__ bool intersectTriangle(const float4& origin,
+                                         const float4& dir, const int4* indices,
+                                         const float4* vertices, int triId,
+                                         Hit& isect, int numTriangles,
+                                         int numVertices) {
   const int4 tri = indices[triId];
   /*const int4 tri = tex1Dfetch(texture_indices, triId);*/
-  int trix = tri.x;
-  int triy = tri.y;
-  int triz = tri.z;
-#endif
-#ifdef REMAP_VERTICES_SOA
-  const float* x_values = reinterpret_cast<const float*>(vertices);
-  const float* y_values = x_values + numVertices;
-  const float* z_values = y_values + numVertices;
-  const float& ax = x_values[trix];
-  const float& bx = x_values[triy];
-  const float& cx = x_values[triz];
-  const float& ay = y_values[trix];
-  const float& by = y_values[triy];
-  const float& cy = y_values[triz];
-  const float& az = z_values[trix];
-  const float& bz = z_values[triy];
-  const float& cz = z_values[triz];
-  const float4 a = make_float4(ax, ay, az, 0.0f);
-  const float4 b = make_float4(bx, by, bz, 0.0f);
-  const float4 c = make_float4(cx, cy, cz, 0.0f);
-#else
-  /*const float4 a = vertices[trix];*/
-  /*const float4 b = vertices[triy];*/
-  /*const float4 c = vertices[triz];*/
-  const float4 a = tex1Dfetch(texture_vertices, trix);
-  const float4 b = tex1Dfetch(texture_vertices, triy);
-  const float4 c = tex1Dfetch(texture_vertices, triz);
-#endif
+  const float4 a = vertices[tri.x];
+  const float4 b = vertices[tri.y];
+  const float4 c = vertices[tri.z];
+  /*const float4 a = tex1Dfetch(texture_vertices, tri.x);*/
+  /*const float4 b = tex1Dfetch(texture_vertices, tri.y);*/
+  /*const float4 c = tex1Dfetch(texture_vertices, tri.z);*/
   const float4 e1 = b - a;
   const float4 e2 = c - a;
-  const float4 pVec = make_float4(ray->dir.y * e2.z - ray->dir.z * e2.y,
-                                  ray->dir.z * e2.x - ray->dir.x * e2.z,
-                                  ray->dir.x * e2.y - ray->dir.y * e2.x, 0.0f);
+  const float4 pVec =
+      make_float4(dir.y * e2.z - dir.z * e2.y, dir.z * e2.x - dir.x * e2.z,
+                  dir.x * e2.y - dir.y * e2.x, 0.0f);
   float det = dot43(e1, pVec);
 #ifndef DIVERGENCE_FREE_INSTERSECT_TRIANGLE
   if (det > -kEpsilon && det < kEpsilon) return false;
 #endif
   float invDet = 1.0f / det;
-  float4 tVec = make_float4(ray->origin.x - a.x, ray->origin.y - a.y,
-                            ray->origin.z - a.z, 0.0f);
+  float4 tVec =
+      make_float4(origin.x - a.x, origin.y - a.y, origin.z - a.z, 0.0f);
   float4 qVec =
       make_float4(tVec.y * e1.z - tVec.z * e1.y, tVec.z * e1.x - tVec.x * e1.z,
                   tVec.x * e1.y - tVec.y * e1.x, 0.0f);
@@ -457,9 +381,9 @@ inline __device__ bool intersectTriangle(const Ray* ray, const int4* indices,
 #ifndef DIVERGENCE_FREE_INSTERSECT_TRIANGLE
   if (u < 0.0f || u > 1.0f) return false;
 #endif
-  float v = ray->dir.x * qVec.x;
-  v += ray->dir.y * qVec.y;
-  v += ray->dir.z * qVec.z;
+  float v = dir.x * qVec.x;
+  v += dir.y * qVec.y;
+  v += dir.z * qVec.z;
   v *= invDet;
 #ifndef DIVERGENCE_FREE_INSTERSECT_TRIANGLE
   if (v < 0.0f || u + v > 1.0f) return false;
@@ -476,11 +400,11 @@ inline __device__ bool intersectTriangle(const Ray* ray, const int4* indices,
 }
 
 inline __host__ __device__ __host__ void createEvents0(
-    const float3* origin, const float3* direction, const float4& invDirection,
+    const float4& origin, const float4& direction, const float4& invDirection,
     const float4& center, const float4& hit, float tNear, float tFar,
     OctreeEvent* events, int16_t* N) {
   float4 diff_center_origin = make_float4(
-      center.x - origin->x, center.y - origin->y, center.z - origin->z, 0.0f);
+      center.x - origin.x, center.y - origin.y, center.z - origin.z, 0.0f);
   float4 t = make_float4(diff_center_origin.x * invDirection.x,
                          diff_center_origin.y * invDirection.y,
                          diff_center_origin.z * invDirection.z, 0.0f);
@@ -544,12 +468,12 @@ inline __host__ __device__ __host__ void createEvents0(
   events[k + 2].t = tFar;
   events[k + 2].mask = 0;
   *N = (k + 1) + 2;
-  unsigned char xMask = (events[1].type == OCTREE_EVENT_X) &
-                        ((xBit == 1) | (direction->x < 0.0f));
-  unsigned char yMask = (events[1].type == OCTREE_EVENT_Y) &
-                        ((yBit == 1) | (direction->y < 0.0f));
-  unsigned char zMask = (events[1].type == OCTREE_EVENT_Z) &
-                        ((zBit == 1) | (direction->z < 0.0f));
+  unsigned char xMask =
+      (events[1].type == OCTREE_EVENT_X) & ((xBit == 1) | (direction.x < 0.0f));
+  unsigned char yMask =
+      (events[1].type == OCTREE_EVENT_Y) & ((yBit == 1) | (direction.y < 0.0f));
+  unsigned char zMask =
+      (events[1].type == OCTREE_EVENT_Z) & ((zBit == 1) | (direction.z < 0.0f));
   unsigned char mask = xMask | (yMask << 1) | (zMask << 2);
   //  if ((k + 1) + 2 > 2 && events[0].t == events[1].t)
   events[0].mask =
@@ -634,7 +558,6 @@ inline __device__ void intersectOctree(
   Aabb4 aabbStack[STACK_SIZE];
   float tNearStack[STACK_SIZE];
   float tFarStack[STACK_SIZE];
-  __shared__ Ray localRays[THREADS_PER_BLOCK];
   __shared__ volatile int localRayCount[WARPS_PER_BLOCK];
   __shared__ volatile int localNextRay[WARPS_PER_BLOCK];
 
@@ -660,18 +583,16 @@ inline __device__ void intersectOctree(
       localRayCount[warpIdx] -= WARP_SIZE;
     }
 
-    // Get the ray from global storage.
-    localRays[threadIdx.x] = *(reinterpret_cast<const Ray*>(rays) + rayIdx);
     /**reinterpret_cast<float4*>(&localRays[threadIdx.x]) =*/
     /*tex1Dfetch(texture_rays, rayIdx * 2);*/
     /**(reinterpret_cast<float4*>(&localRays[threadIdx.x]) + 1) =*/
     /*tex1Dfetch(texture_rays, rayIdx * 2 + 1);*/
 
-    const Ray* ray = &localRays[threadIdx.x];
-
     // Initialize traversal.
-    const float4 invDirection = make_float4(
-        1.0f / ray->dir.x, 1.0f / ray->dir.y, 1.0f / ray->dir.z, 0.0f);
+    const float4 origin = rays[rayIdx * 2];
+    const float4 dir = rays[rayIdx * 2 + 1];
+    const float4 invDirection =
+        make_float4(1.0f / dir.x, 1.0f / dir.y, 1.0f / dir.z, 0.0f);
     int16_t stackEnd = 1;
     int currentId = -1;
     float tNear = 0.0f, tFar = 0.0f;
@@ -686,8 +607,8 @@ inline __device__ void intersectOctree(
     nodeIdStack[0] = 0;
     aabbStack[0] = bounds;
     bool hitBounds =
-        intersectAabb2(&ray->origin, invDirection, aabbStack[0], 0.0f,
-                       NPP_MAXABS_32F, &tNearStack[0], &tFarStack[0]);
+        intersectAabb2(origin, invDirection, aabbStack[0], 0.0f, NPP_MAXABS_32F,
+                       &tNearStack[0], &tFarStack[0]);
 
     while (hitBounds & !(objectHit | stackEmpty)) {
       // Setup beore entering loop.
@@ -710,9 +631,9 @@ inline __device__ void intersectOctree(
         // Get node information.
         currentId = nodeIdStack[stackEnd - 1];
         Aabb4 currentBounds = aabbStack[stackEnd - 1];
-        float4 hit = make_float4(ray->origin.x + tNear * ray->dir.x,
-                                 ray->origin.y + tNear * ray->dir.y,
-                                 ray->origin.z + tNear * ray->dir.z, 0.0f);
+        float4 hit =
+            make_float4(origin.x + tNear * dir.x, origin.y + tNear * dir.y,
+                        origin.z + tNear * dir.z, 0.0f);
         float4 center =
             getSplitPoint(&currentHeader, &currentFooter, currentBounds);
 
@@ -720,8 +641,8 @@ inline __device__ void intersectOctree(
         int16_t numEvents = 0;
         OctreeEvent events[5];
         int16_t numValidEvents = 0;
-        createEvents0(&ray->origin, &ray->dir, invDirection, center, hit, tNear,
-                      tFar, events, &numEvents);
+        createEvents0(origin, dir, invDirection, center, hit, tNear, tFar,
+                      events, &numEvents);
         unsigned char octantBits = 0x0;
 
         // Get children.
@@ -784,7 +705,7 @@ inline __device__ void intersectOctree(
         isect.t = NPP_MAXABS_32F;
         isect.triId = -1;
         bool isNewClosest =
-            intersectTriangle(ray, indices, vertices, triId, isect,
+            intersectTriangle(origin, dir, indices, vertices, triId, isect,
                               numTriangles, numVertices) &
             isect.t >= tNear & isect.t <= tFar & isect.t < closest.t;
         closest.t = isNewClosest * isect.t + !isNewClosest * closest.t;
@@ -856,10 +777,12 @@ void CUDAOctreeRenderer::createRaysOrtho(Ray** d_rays, int* numRays) {
   dim3 blockSize(32, 16);
   dim3 gridSize(idivCeil(image.width, blockSize.x),
                 idivCeil(rows, blockSize.y));
+  std::cout << " width = " << image.width << " height = " << image.height
+            << " rows = " << rows << "\n";
   createRaysOrthoKernel<<<gridSize, blockSize>>>(
       image.width, rows, x0, y0 + dy * yOffset, z, dx, dy * yStride,
       (float4*)*d_rays);
-  cudaDeviceSynchronize();
+  CHK_CUDA(cudaDeviceSynchronize());
 
   *numRays = count;
 }
@@ -870,69 +793,35 @@ void CUDAOctreeRenderer::loadScene() {
 }
 
 void CUDAOctreeRenderer::render() {
-  int3* d_indices;
-  float3* d_vertices;
+  int4* d_indices;
+  float4* d_vertices;
 
   // Clear the device.  It is ours now.
   CHK_CUDA(cudaDeviceReset());
 
   loadScene();
 
-  CHK_CUDA(cudaMalloc((void**)&d_indices, scene.numTriangles * sizeof(int3)));
+  CHK_CUDA(cudaMalloc((void**)&d_indices, scene.numTriangles * sizeof(int4)));
   CHK_CUDA(
-      cudaMalloc((void**)&d_vertices, scene.numTriangles * sizeof(float3)));
+      cudaMalloc((void**)&d_vertices, scene.numTriangles * sizeof(float4)));
 
   LOG(DEBUG) << "numTriangles = " << scene.numTriangles << " "
              << " numVertices = " << scene.numVertices << "\n";
 
-#ifdef REMAP_INDICES_SOA
-  int3* indices = new int3[scene.numTriangles];
-  int* a_indices = reinterpret_cast<int*>(indices);
-  int* b_indices = a_indices + scene.numTriangles;
-  int* c_indices = b_indices + scene.numTriangles;
-  for (int i = 0; i < scene.numTriangles; ++i) {
-    int3 index = scene.indices[i];
-    a_indices[i] = index.x;
-    b_indices[i] = index.y;
-    c_indices[i] = index.z;
-  }
-#else
-  int3* indices = scene.indices;
-#endif
+  int4* indices = scene.indices;
 
-  CHK_CUDA(cudaMemcpy(d_indices, indices, scene.numTriangles * sizeof(int3),
+  CHK_CUDA(cudaMemcpy(d_indices, indices, scene.numTriangles * sizeof(int4),
                       cudaMemcpyHostToDevice));
 
-#ifdef REMAP_INDICES_SOA
-  delete[] indices;
-#endif
+  float4* vertices = scene.vertices;
 
-#ifdef REMAP_VERTICES_SOA
-  float3* vertices = new float3[scene.numVertices];
-  float* x_values = reinterpret_cast<float*>(vertices);
-  float* y_values = x_values + scene.numVertices;
-  float* z_values = y_values + scene.numVertices;
-  for (int i = 0; i < scene.numVertices; ++i) {
-    float3 vertex = scene.vertices[i];
-    x_values[i] = vertex.x;
-    y_values[i] = vertex.y;
-    z_values[i] = vertex.z;
-  }
-#else
-  float3* vertices = scene.vertices;
-#endif
-
-  CHK_CUDA(cudaMemcpy(d_vertices, vertices, scene.numVertices * sizeof(float3),
+  CHK_CUDA(cudaMemcpy(d_vertices, vertices, scene.numVertices * sizeof(float4),
                       cudaMemcpyHostToDevice));
 
-#ifdef REMAP_VERTICES_SOA
-  delete[] vertices;
-#endif
+  traceOnDevice(d_indices, d_vertices);
 
-  traceOnDevice(&d_indices, &d_vertices);
-
-  cudaFree(d_indices);
-  cudaFree(d_vertices);
+  CHK_CUDA(cudaFree(d_indices));
+  CHK_CUDA(cudaFree(d_vertices));
 
   CHK_CUDA(cudaDeviceReset());
 }
@@ -968,12 +857,15 @@ void CUDAOctreeRenderer::build(Octree<LAYOUT_SOA>* d_octree) {
   }
 }
 
-void CUDAOctreeRenderer::traceOnDevice(int3** indices, float3** vertices) {
+void CUDAOctreeRenderer::traceOnDevice(int4* indices, float4* vertices) {
   const int numThreadsPerBlock = THREADS_PER_BLOCK;
   const int numWarps = 200;
+
+  cudaDeviceSetSharedMemConfig(cudaSharedMemBankSizeEightByte);
+
   //      (numRays + WARP_BATCH_SIZE - 1) / WARP_BATCH_SIZE;
   const int numBlocks = (numWarps + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;
-
+    
   // Allocate rays.
   CHK_CUDA(cudaMalloc(&d_rays, sizeof(Ray) * numRays));
 
@@ -1002,25 +894,10 @@ void CUDAOctreeRenderer::traceOnDevice(int3** indices, float3** vertices) {
 
   build(d_octree);
 
-/*NodeStorage<LAYOUT_SOA>* d_storage = &(d_octree->m_nodeStorage);*/
-/*uint32_t* d_numNodes = &(d_storage->numNodes);*/
-/*uint32_t numNodes = 0;*/
-/*CHK_CUDA(cudaMemcpy(&numNodes, d_numNodes, sizeof(uint32_t),*/
-/*cudaMemcpyHostToDevice));*/
-/*LOG(DEBUG) << "Check number of nodes on device: " << numNodes << "\n";*/
-
 #ifdef UPDATE_HITS_SOA
   LOG(DEBUG) << "Using SOA format for hits.\n";
 #endif
   LOG(DEBUG) << "Ray tracing...\n";
-
-#ifndef REMAP_INDICES_SOA
-  cudaReallocateAndAssignArray<int3, int4>((void**)indices, scene.numTriangles);
-#endif
-#ifndef REMAP_VERTICES_SOA
-  cudaReallocateAndAssignArray<float3, float4>((void**)vertices,
-                                               scene.numVertices);
-#endif
 
   // OK, let's bind textures.
   cudaBindTexture(0, texture_rays, d_rays, numRays * sizeof(Ray));
@@ -1039,9 +916,9 @@ void CUDAOctreeRenderer::traceOnDevice(int3** indices, float3** vertices) {
                       sizeof(OctNodeHeader*), cudaMemcpyDeviceToHost))
   cudaBindTexture(0, texture_headers, d_headers,
                   sizeof(OctNodeHeader) * numNodes);
-  cudaBindTexture(0, texture_vertices, *vertices,
+  cudaBindTexture(0, texture_vertices, vertices,
                   scene.numVertices * sizeof(float4));
-  cudaBindTexture(0, texture_indices, *indices,
+  cudaBindTexture(0, texture_indices, indices,
                   scene.numTriangles * sizeof(int4));
   uint32_t numReferences = 0;
   CHK_CUDA(cudaMemcpy(&numReferences, d_octree->numTriangleReferencesPtr(),
@@ -1058,46 +935,34 @@ void CUDAOctreeRenderer::traceOnDevice(int3** indices, float3** vertices) {
   Aabb4 bounds;
   bounds.min = make_float4(scene.bbmin, 0.0);
   bounds.max = make_float4(scene.bbmax, 0.0);
-  struct timespec start = getRealTime();
-
+  float time;
+  cudaEvent_t start_event, stop_event;
+  CHK_CUDA(cudaEventCreate(&start_event));
+  CHK_CUDA(cudaEventCreate(&stop_event));
+  CHK_CUDA(cudaEventRecord(start_event, 0));
   traceKernel<<<numBlocks, numThreadsPerBlock>>>(
-      reinterpret_cast<float4*>(d_rays), d_headers, d_footers,
-      reinterpret_cast<float4*>(*vertices), reinterpret_cast<int4*>(*indices),
-      d_references, bounds, scene.numTriangles, scene.numVertices, numRays,
-      d_hits);
-
-  cudaDeviceSynchronize();
-  struct timespec end = getRealTime();
-  double elapsed_microseconds = getTimeDiffMs(start, end);
+      reinterpret_cast<float4*>(d_rays), d_headers, d_footers, vertices,
+      indices, d_references, bounds, scene.numTriangles, scene.numVertices,
+      numRays, d_hits);
+  CHK_CUDA(cudaEventRecord(stop_event, 0));
+  CHK_CUDA(cudaEventSynchronize(stop_event));
+  cudaEventElapsedTime(&time, start_event, stop_event);
 
   LOG(DEBUG) << "Done...\n";
-  LOG(DEBUG) << "Start: " << start.tv_sec << " sec " << start.tv_nsec
-             << " nsec, End: " << end.tv_sec << " sec " << end.tv_nsec
-             << " nsec.\n";
-  LOG(DEBUG) << "Elapsed time = " << elapsed_microseconds << " microsec"
-             << "," << elapsed_microseconds / 1000.0 << " millisec\n";
-  float ns_per_ray = 1000.0 * elapsed_microseconds / numRays;
+  LOG(DEBUG) << "Elapsed time = " << time * 1000.0 << " microsec"
+             << ", " << time  << " millisec\n";
+  float ns_per_ray = 1000000.0 * time / numRays;
   LOG(DEBUG) << "Traced " << numRays << " rays at " << ns_per_ray
              << " nanoseconds per ray\n";
-  float mrays_sec = numRays / elapsed_microseconds;
+  float mrays_sec = numRays / (1000.0 * time);
   LOG(DEBUG) << "Rate is " << mrays_sec << " million rays per second.\n";
   Octree<LAYOUT_SOA>::freeOnGpu(d_octree);
   CHK_CUDA(cudaFree((void*)(d_octree)));
-#ifdef USE_PERSISTENT
-#endif
 #ifdef UPDATE_HITS_SOA
   LOG(DEBUG) << "Converting hits from SOA to AOS.\n";
   reorderHitsKernel<<<numBlocks, numThreadsPerBlock>>>(d_hits, numRays);
   cudaDeviceSynchronize();
   LOG(DEBUG) << "SOA to AOS conversion done.\n";
-#endif
-
-#ifndef REMAP_INDICES_SOA
-  cudaReallocateAndAssignArray<int4, int3>((void**)indices, scene.numTriangles);
-#endif
-#ifndef REMAP_VERTICES_SOA
-  cudaReallocateAndAssignArray<float4, float3>((void**)vertices,
-                                               scene.numVertices);
 #endif
 
   // Copy hits locally.
@@ -1107,8 +972,6 @@ void CUDAOctreeRenderer::traceOnDevice(int3** indices, float3** vertices) {
 
   CHK_CUDA(cudaFree(d_hits));
   CHK_CUDA(cudaFree(d_rays));
-
-  CHK_CUDA(cudaDeviceReset());
 }
 
 void CUDAOctreeRenderer::shade() {
@@ -1128,13 +991,14 @@ void CUDAOctreeRenderer::shade() {
 #endif
         continue;
       }
-      const int3 tri = scene.indices[hits[i].triId];
-      const float3 v0 = scene.vertices[tri.x];
-      const float3 v1 = scene.vertices[tri.y];
-      const float3 v2 = scene.vertices[tri.z];
-      const float3 e0 = v1 - v0;
-      const float3 e1 = v2 - v0;
-      const float3 n = normalize(cross(e0, e1));
+      const int4 tri = scene.indices[hits[i].triId];
+      const float4 v0 = scene.vertices[tri.x];
+      const float4 v1 = scene.vertices[tri.y];
+      const float4 v2 = scene.vertices[tri.z];
+      const float4 e0 = v1 - v0;
+      const float4 e1 = v2 - v0;
+      const float3 n = normalize(
+          cross(make_float3(e0.x, e0.y, e0.z), make_float3(e1.x, e1.y, e1.z)));
 
       image.pixel[i] = 0.5f * n + make_float3(0.5f, 0.5f, 0.5f);
     }
