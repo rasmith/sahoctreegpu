@@ -11,9 +11,9 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/third_party/glm)
 find_package(CUDA 7.5 REQUIRED)
 include_directories(${CUDA_INCLUDE_DIRS}) 
 
-set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS};--keep;-G;-g;-lineinfo;-Xptxas;-v")
-#set(CUDA_NVCC_FLAGS 
-  #"${CUDA_NVCC_FLAGS};-Xptxas;-v;--use_fast_math;-O3;-arch=sm_20;")
+#set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS};--keep;-G;-g;-lineinfo;-Xptxas;-v")
+set(CUDA_NVCC_FLAGS 
+  "${CUDA_NVCC_FLAGS};-Xptxas;-v;--use_fast_math;-O3;-arch=sm_20;")
 
 #set(CUDA_SEPARABLE_COMPILATION ON)
 

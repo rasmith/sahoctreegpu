@@ -45,7 +45,7 @@ inline bool compareBits<0>(const unsigned char *a, const unsigned char *b) {
   return true;
 }
 
-inline uint32_t countBits(unsigned char c) {
+__device__ __host__ inline uint32_t countBits(unsigned char c) {
   return (c & 0x1) + ((c & 0x2) >> 1) + ((c & 0x4) >> 2) + ((c & 0x8) >> 3) +
          ((c & 0x10) >> 4) + ((c & 0x20) >> 5) + ((c & 0x40) >> 6) +
          ((c & 0x80) >> 7);

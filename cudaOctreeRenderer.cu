@@ -27,7 +27,7 @@
 #define MAX_BLOCKS_PER_DIMENSION 65535
 //#define UPDATE_HITS_SOA
 
-#define WARP_LOAD_FACTOR 1  // This is effectively #rays / threads
+#define WARP_LOAD_FACTOR 2  // This is effectively #rays / threads
 #define WARP_BATCH_SIZE (WARP_LOAD_FACTOR * WARP_SIZE)  // #rays / warp batch
 __device__ int nextRayIndex;
 
@@ -344,12 +344,12 @@ inline __device__ bool intersectTriangle(const float4& origin,
                                          int numVertices) {
   const int4 tri = indices[triId];
   /*const int4 tri = tex1Dfetch(texture_indices, triId);*/
-  const float4 a = vertices[tri.x];
-  const float4 b = vertices[tri.y];
-  const float4 c = vertices[tri.z];
-  /*const float4 a = tex1Dfetch(texture_vertices, tri.x);*/
-  /*const float4 b = tex1Dfetch(texture_vertices, tri.y);*/
-  /*const float4 c = tex1Dfetch(texture_vertices, tri.z);*/
+  /*const float4 a = vertices[tri.x];*/
+  /*const float4 b = vertices[tri.y];*/
+  /*const float4 c = vertices[tri.z];*/
+  const float4 a = tex1Dfetch(texture_vertices, tri.x);
+  const float4 b = tex1Dfetch(texture_vertices, tri.y);
+  const float4 c = tex1Dfetch(texture_vertices, tri.z);
   const float4 e1 = b - a;
   const float4 e2 = c - a;
   const float4 pVec =
@@ -396,6 +396,204 @@ inline __device__ bool intersectTriangle(const float4& origin,
 #else
   return true;
 #endif
+}
+
+template <typename I, typename T>
+inline __device__ __host__ void permute3(const I* order, T* a) {
+  T tempT;
+  I tempOrder[3] = {order[0], order[1], order[2]};
+  I tempI;
+  bool lessThan = tempOrder[2] < tempOrder[1];
+  exchangeIf(lessThan, &tempT, a + 1, a + 2);
+  exchangeIf(lessThan, &tempI, tempOrder + 1, tempOrder + 2);
+  lessThan = tempOrder[1] < tempOrder[0];
+  exchangeIf(lessThan, &tempT, a, a + 1);
+  exchangeIf(lessThan, &tempI, tempOrder, tempOrder + 1);
+  lessThan = tempOrder[2] < tempOrder[1];
+  exchangeIf(lessThan, &tempT, a + 1, a + 2);
+  exchangeIf(lessThan, &tempI, tempOrder + 1, tempOrder + 2);
+};
+
+template <typename T, typename Comparator>
+inline __device__ __host__ void compareExchange(const Comparator& c, T* temp,
+                                                T* x, T* y) {
+  bool lessThan = c(*y, *x);
+  exchangeIf(lessThan, temp, x, y);
+}
+
+template <typename T, typename Comparator>
+inline __device__ __host__ void sort3(const Comparator& c, T* a) {
+  T temp;
+  compareExchange(c, &temp, a + 1, a + 2);
+  compareExchange(c, &temp, a, a + 1);
+  compareExchange(c, &temp, a + 1, a + 2);
+};
+
+inline __host__ __device__ __host__ void createEvents(
+    const float3* origin, const float3* direction, const float4& invDirection,
+    const float4& center, const float4& hit, float tNear, float tFar,
+    OctreeEvent* events, int16_t* N) {
+  // Compute the default entry point.
+  unsigned char xBit = (hit.x > center.x);
+  unsigned char yBit = (hit.y > center.y);
+  unsigned char zBit = (hit.z > center.z);
+  unsigned char octant = xBit | (yBit << 1) | (zBit << 2);
+
+  // Compute the t values for which the ray crosses each x, y, z intercept.
+  float4 diff_center_origin = make_float4(
+      center.x - origin->x, center.y - origin->y, center.z - origin->z, 0.0f);
+  float4 t = make_float4(diff_center_origin.x * invDirection.x,
+                         diff_center_origin.y * invDirection.y,
+                         diff_center_origin.z * invDirection.z, 0.0f);
+
+  // Create the events, unsorted.
+  OctreeEvent eventEntry = {OCTREE_EVENT_ENTRY, octant, tNear};
+  OctreeEvent eventX = {OCTREE_EVENT_X, 0x1, t.x};
+  OctreeEvent eventY = {OCTREE_EVENT_Y, 0x2, t.y};
+  OctreeEvent eventZ = {OCTREE_EVENT_Z, 0x4, t.z};
+  OctreeEvent eventExit = {OCTREE_EVENT_EXIT, 0, tFar};
+
+  events[1] = eventX;
+  events[2] = eventY;
+  events[3] = eventZ;
+
+  OctreeEvent* planarEvents = &events[1];
+
+  // Mask lookup table.
+
+  // Each event is compared and a value for each mask output is computed.
+  // This is necessary since some events could have equal t-intercepts.
+  // This means the ray hits some projection of the centroid in the x, y, z
+  // planes defined by the centroid: it hits (x, y, z), (x, y), (y, x),
+  // or (y, z).
+  //
+  // NOTE: if there is a case such as t_x == t_y and t_y == t_z, but
+  // t_x != t_z, this is treated as if t_x = t_y = t_z.
+  unsigned char equals_01 = (planarEvents[0].t == planarEvents[1].t);
+  unsigned char equals_02 = (planarEvents[0].t == planarEvents[2].t);
+  unsigned char equals_12 = (planarEvents[1].t == planarEvents[2].t);
+  unsigned char unique0 = (equals_01 | equals_02) ^ 0x1;
+  unsigned char unique1 = (equals_01 | equals_12) ^ 0x1;
+  unsigned char unique2 = (equals_02 | equals_12) ^ 0x1;
+
+  // Result of unique_* is:
+  // unique0 unique1 unique2   output index
+  //    0       0       0          000 = 0
+  //    0       0       1          001 = 1
+  //    0       1       0          010 = 2
+  //    1       0       0          011 = 3
+  //    1       1       1          100 = 4
+  //
+  // The mask lookup index in binary is: u'_2 u'_1 u'_0.
+  // This results in the sorted order of the output unique values and give
+  // an index that can be used to acces the mask lookup table.
+  // The equations for the u'_* values are:
+  //
+  // u'_2 = u_2 && u_1
+  // u'_1 = (u_2 || u_1) && !u_0
+  // u'_0 = (u_2 || u_0) && !u_1
+  unsigned char maskLookupIndex = ((unique0 & unique1) << 2) |
+                                  ((unique0 | unique1) & (unique2 ^ 0x1)) << 1 |
+                                  ((unique2 | unique0) & (unique1 ^ 0x1));
+  const unsigned char mask_X = 0x1;
+  const unsigned char mask_Y = 0x2;
+  const unsigned char mask_Z = 0x4;
+  const unsigned char mask_XY = mask_X | mask_Y;
+  const unsigned char mask_XZ = mask_X | mask_Z;
+  const unsigned char mask_YZ = mask_Y | mask_Z;
+  const unsigned char mask_XYZ = mask_X | mask_Y | mask_Z;
+  const unsigned char maskLookupTable[5][3] = {
+      {mask_XYZ, mask_XYZ, mask_XYZ},  // 000 - t_x, t_y, t_z all equal
+      {mask_XY, mask_XY, mask_Z},      // 001 - t_x == t_y only
+      {mask_XZ, mask_Y, mask_XZ},      // 010 - t_x == t_z only
+      {mask_X, mask_YZ, mask_YZ},      // 100 - t_y == t_z only
+      {mask_X, mask_Y, mask_Z}         // 111 - t_x, t_y, t_z all unique
+  };
+
+  // Permutation lookup table and permutation index.
+  // After sorting, validity is checked, and invalid entries must be permuted.
+  // The permutation is gotten by computing an index into a lookup table.
+  unsigned char check0 = isValidT(planarEvents[0].t, tNear, tFar);
+  unsigned char check1 = isValidT(planarEvents[1].t, tNear, tFar);
+  unsigned char check2 = isValidT(planarEvents[2].t, tNear, tFar);
+  // After validity check, need to check both uniqueness and validity to ensure
+  // each element is valid.  This is a conservative evaluation: if A and B are
+  // equal and one is invalid, then both are invalid.
+  unsigned char check01 = unique0 | unique1 | (check0 & check1);
+  unsigned char check02 = unique0 | unique2 | (check0 & check2);
+  unsigned char check12 = unique1 | unique2 | (check1 & check2);
+  // Final validity computed.  A is valid if the initial check is true
+  // and it is not equivalent to some other invalid value.
+  unsigned char validTable[3];
+  validTable[0] = check0 & check01 & check02;
+  validTable[1] = check1 & check01 & check12;
+  validTable[2] = check2 & check02 & check12;
+  const unsigned char permutationTable[8][3] = {
+      {0, 1, 2},  // 000
+      {1, 2, 0},  // 001
+      {1, 0, 2},  // 010
+      {2, 0, 1},  // 011
+      {0, 1, 2},  // 100
+      {0, 2, 1},  // 101
+      {0, 1, 2},  // 110
+      {0, 1, 2}   // 111
+  };
+
+  // Compute masks according to table.
+  planarEvents[0].mask = maskLookupTable[maskLookupIndex][0];
+  planarEvents[1].mask = maskLookupTable[maskLookupIndex][1];
+  planarEvents[2].mask = maskLookupTable[maskLookupIndex][2];
+
+  // Sort.
+  OctreeEventComparator comparator;
+  sort3(comparator, planarEvents);
+
+  // Compute the permutation index here.
+  // The index computation needs to be delayed, since the permutation table
+  // assumes events are in sorted order w.r.t t-values.
+  unsigned char permutationIndex = validTable[planarEvents[2].type] |
+                                   validTable[planarEvents[1].type] << 1 |
+                                   validTable[planarEvents[0].type] << 2;
+  // Shuffle according to table. Events that are duplicate or invalid
+  // will be shuffled to the end.  This is why sorted order is important.
+  permute3(permutationTable[permutationIndex], planarEvents);
+
+  // Compute number of internal events.
+  // Count 0 if valid_0
+  // Count 1 if:
+  //    valid_1 unique0 unique1 unique2 output
+  //      1         0       0       0       0
+  //                1       0       0       1
+  //                0       1       0       1
+  //                0       0       1       0
+  //                1       1       1       1
+  unsigned char k = validTable[0] + (validTable[1] & (unique0 | unique1)) +
+                    (validTable[2] & unique2);
+
+  // Write entry and exit events.
+  events[0] = eventEntry;
+  events[k + 1] = eventExit;
+
+  // Number of events total (including entry and exit).
+  int16_t Nevents = k + 2;
+  *N = Nevents;
+
+  // Compute entry mask. This should usually be 000, but if the ray hits
+  // an X, Y, or Z plane at the boundary of a node, then the mask needs
+  // to be different.  Computing the XOR of this mask with the bitwise
+  // representation of the octant gives the correct entry mask.
+  bool entryEqualsFirst = events[0].t == events[1].t;
+  bool isX = events[1].type == OCTREE_EVENT_X;
+  bool isY = events[1].type == OCTREE_EVENT_Y;
+  bool isZ = events[1].type == OCTREE_EVENT_Z;
+  unsigned char xMask =
+      Nevents > 2 & entryEqualsFirst & isX & (xBit | (direction->x < 0.0f));
+  unsigned char yMask =
+      Nevents > 2 & entryEqualsFirst & isY & (yBit | (direction->y < 0.0f));
+  unsigned char zMask =
+      Nevents > 2 & entryEqualsFirst & isZ & (zBit | (direction->z < 0.0f));
+  unsigned char mask = xMask | (yMask << 1) | (zMask << 2);
+  events[0].mask = events[0].mask ^ mask;
 }
 
 inline __host__ __device__ __host__ void createEvents0(
@@ -498,7 +696,7 @@ inline float4 __device__ __host__ getSplitPoint(const OctNode128* node,
 //#define DEBUG_TRAVERSE
 #ifdef DEBUG_TRAVERSE
 //#define DEBUG_TRAVERSE_THREAD_ID 389308
-#define DEBUG_TRAVERSE_THREAD_ID 0
+#define DEBUG_TRAVERSE_THREAD_ID 190365
 //#define DEBUG_TRAVERSE_THREAD_ID 386858  // t = 0.485482
 #endif
 #define MAX_DEPTH 15
@@ -550,6 +748,19 @@ inline __device__ void intersectOctree(
 
     // Get the next ray for this thread.
     int rayIdx = localNextRay[warpIdx] + laneId;
+#ifdef DEBUG_TRAVERSE
+    int numNodes = 0;
+    int numLeaves = 0;
+    int depthStack[STACK_SIZE];
+    int depth = 0;
+    depthStack[0] = 0;
+    if (rayIdx == DEBUG_TRAVERSE_THREAD_ID) {
+      const float4 o = rays[rayIdx * 2];
+      const float4 d = rays[rayIdx * 2 + 1];
+      printf("[%d] o = %f %f %f, d = %f %f %f\n", tid, o.x, o.y, o.z, d.x, d.y,
+             d.z);
+    }
+#endif
     bool goodThread = rayIdx < numRays;
     if (!goodThread) break;
 
@@ -585,6 +796,14 @@ inline __device__ void intersectOctree(
     bool hitBounds =
         intersectAabb2(origin, invDirection, aabbStack[0], 0.0f, NPP_MAXABS_32F,
                        &tNearStack[0], &tFarStack[0]);
+#ifdef DEBUG_TRAVERSE
+    if (rayIdx == DEBUG_TRAVERSE_THREAD_ID) {
+      printf(
+          "hitBounds = %d, objectHit = %d, stackEmpty = %d tNear = % f tFar = "
+          "% f\n",
+          hitBounds, objectHit, stackEmpty, tNearStack[0], tFarStack[0]);
+    }
+#endif
 
     while (hitBounds & !(objectHit | stackEmpty)) {
       // Setup beore entering loop.
@@ -594,16 +813,33 @@ inline __device__ void intersectOctree(
       if (!stackEmpty) {
         *reinterpret_cast<uint4*>(&currentNode) =
             tex1Dfetch(texture_nodes, currentId);
+        /*currentNode = *reinterpret_cast<const
+         * OctNode128*>(&nodes[currentId]);*/
       }
-      bool foundLeaf = (currentNode.header.type == NODE_LEAF);
+      bool foundLeaf = (currentNode.header.type == NODE_LEAF) && !stackEmpty;
       tNear = !stackEmpty * tNearStack[!stackEmpty * (stackEnd - 1)];
       tFar = !stackEmpty * tFarStack[!stackEmpty * (stackEnd - 1)];
 
       // Go until stack empty or found a leaf.
-      while (!foundLeaf & !stackEmpty) {
+      while (!foundLeaf && !stackEmpty) {
         // Get node information.
         currentId = nodeIdStack[stackEnd - 1];
         Aabb4 currentBounds = aabbStack[stackEnd - 1];
+#ifdef DEBUG_TRAVERSE
+        ++numNodes;
+        depth = depthStack[stackEnd - 1];
+        if (rayIdx == DEBUG_TRAVERSE_THREAD_ID) {
+          printf("[%08d]", currentId);
+          for (int i = 0; i < depth; ++i) printf("  ");
+          printf("[N $%x #%d @%d +%d %d, %d, %d, %d] %f %f\n",
+                 currentNode.footer.internal.childMask,
+                 countBits(currentNode.footer.internal.childMask),
+                 currentNode.header.octant, currentNode.header.offset,
+                 currentNode.footer.internal.i, currentNode.footer.internal.j,
+                 currentNode.footer.internal.k,
+                 currentNode.footer.internal.sizeDescriptor, tNear, tFar);
+        }
+#endif
         float4 hit =
             make_float4(origin.x + tNear * dir.x, origin.y + tNear * dir.y,
                         origin.z + tNear * dir.z, 0.0f);
@@ -622,10 +858,38 @@ inline __device__ void intersectOctree(
         uint32_t childId = currentNode.header.offset;
         octantBits = currentNode.footer.internal.childMask;
 #pragma unroll
-        for (int i = 0; i < 8; ++i) {
+        for (uint32_t i = 0; i < 8; ++i) {
           children[i] = childId;
           childId += ((octantBits >> i) & 0x1);
+#ifdef DEBUG_TRAVERSE
+/*if (rayIdx == DEBUG_TRAVERSE_THREAD_ID) {*/
+/*printf("%d ", children[i]);*/
+/*}*/
+#endif
         }
+#ifdef DEBUG_TRAVERSE
+/*if (rayIdx == DEBUG_TRAVERSE_THREAD_ID) {*/
+/*printf("\n");*/
+/*}*/
+#endif
+#ifdef DEBUG_TRAVERSE
+        if (rayIdx == DEBUG_TRAVERSE_THREAD_ID) {
+          int numChildren = countBits(octantBits);
+          printf("[%08d]", currentId);
+          for (int i = 0; i < depth; ++i) printf("  ");
+          for (int i = 0; i < numChildren; ++i) {
+            OctNode128 child = *reinterpret_cast<const OctNode128*>(
+                &nodes[currentNode.header.offset + i]);
+            if (child.header.type == NODE_LEAF) {
+              printf("L %d %d %d, ", child.header.octant, child.header.offset,
+                     child.footer.leaf.size);
+            } else {
+              printf("N %d, ", child.header.octant);
+            }
+          }
+          printf("\n");
+        }
+#endif
 
         // Figure which octants were hit are non-empty.
         unsigned char octant = 0x0;
@@ -635,7 +899,25 @@ inline __device__ void intersectOctree(
           bool hasChild = ((octantBits & (0x1 << octant)) != 0);
           numValidEvents += hasChild;
         }
+#ifdef DEBUG_TRAVERSE
+        if (rayIdx == DEBUG_TRAVERSE_THREAD_ID) {
+          octant = 0x0;
+          printf("[%08d] #%d", currentId, numEvents);
+          for (int i = 0; i < depth; ++i) printf("  ");
+          for (int i = 0; i < numEvents - 1; ++i) {
+            octant = octant ^ events[i].mask;
+            printf("(%d, %f, %x, %d) ", octant, events[i].t, events[i].mask,
+                   ((octantBits & (0x1 << octant)) != 0));
+          }
+          printf("\n");
+        }
+#endif
 
+#ifdef DEBUG_TRAVERSE
+        if (rayIdx == DEBUG_TRAVERSE_THREAD_ID) {
+          printf("add -->");
+        }
+#endif
         // Add the children in reverse order of being hit to the stack.  This
         // way,  the child that was hit first gets popped first.
         int16_t k = -1;  // keep track of which valid event we have
@@ -647,13 +929,26 @@ inline __device__ void intersectOctree(
           k += hasChild;
           int16_t nextStack = (stackEnd - 1) + numValidEvents - k - 1;
           if (hasChild) {  // divergence
+#ifdef DEBUG_TRAVERSE
+            if (rayIdx == DEBUG_TRAVERSE_THREAD_ID) {
+              printf("%d ", children[octant]);
+            }
+#endif
             nodeIdStack[nextStack] = children[octant];
             aabbStack[nextStack] =
                 getChildBounds(currentBounds, center, octant);
             tNearStack[nextStack] = events[i].t;
             tFarStack[nextStack] = events[i + 1].t;
+#ifdef DEBUG_TRAVERSE
+            depthStack[nextStack] = depth + 1;
+#endif
           }
         }
+#ifdef DEBUG_TRAVERSE
+        if (rayIdx == DEBUG_TRAVERSE_THREAD_ID) {
+          printf("\n");
+        }
+#endif
         stackEnd += numValidEvents;
         --stackEnd;
         stackEmpty = (stackEnd <= 0);
@@ -661,17 +956,46 @@ inline __device__ void intersectOctree(
         if (!stackEmpty) {
           *reinterpret_cast<uint4*>(&currentNode) =
               tex1Dfetch(texture_nodes, currentId);
+          /*currentNode = *reinterpret_cast<const
+           * OctNode128*>(&nodes[currentId]);*/
         }
-        foundLeaf = (currentNode.header.type == NODE_LEAF);
+        foundLeaf = (currentNode.header.type == NODE_LEAF) && !stackEmpty;
         tNear = !stackEmpty * tNearStack[!stackEmpty * (stackEnd - 1)];
         tFar = !stackEmpty * tFarStack[!stackEmpty * (stackEnd - 1)];
       }  // end of while (!foundLeaf && !stackEmpty)
+#ifdef DEBUG_TRAVERSE
+      if (foundLeaf) {
+        ++numLeaves;
+        depth = depthStack[stackEnd - 1];
+        if (rayIdx == DEBUG_TRAVERSE_THREAD_ID) {
+          printf("[%08d]", currentId);
+          for (int i = 0; i < depth; ++i) printf("  ");
+          uint32_t size = currentNode.footer.leaf.size;
+          uint32_t offset = currentNode.header.offset;
+          uint32_t octant = currentNode.header.octant;
+          printf("[L #%d @%d +%d] %f %f\n", size, octant, offset, tNear, tFar);
+        }
+      }
+#endif
 
       // We either have a leaf or stack is empty.
-      uint32_t numPrimitives = !stackEmpty * currentNode.footer.leaf.size;
-      uint32_t offset = !stackEmpty * currentNode.header.offset;
+      uint32_t numPrimitives = currentNode.footer.leaf.size;
+      uint32_t offset = currentNode.header.offset;
       bool triangleHit = false;
+#ifdef DEBUG_TRAVERSE
+/*if (rayIdx == DEBUG_TRAVERSE_THREAD_ID && foundLeaf) {*/
+/*printf("-->[L #%d @%d +%d]\n", numPrimitives, octant, offset);*/
+/*}*/
+#endif
 
+#ifdef DEBUG_TRAVERSE
+      if (rayIdx == DEBUG_TRAVERSE_THREAD_ID && foundLeaf) {
+        printf("[%08d]", currentId);
+        for (int i = 0; i < depth; ++i) printf("  ");
+      }
+#endif
+      numPrimitives *= !stackEmpty;
+      offset *= !stackEmpty;
       for (uint32_t i = 0; i < numPrimitives; ++i) {
         uint32_t triId = references[i + offset];
         /*uint32_t triId = tex1Dfetch(texture_references, i + offset);*/
@@ -680,18 +1004,43 @@ inline __device__ void intersectOctree(
         isect.triId = -1;
         bool isNewClosest =
             intersectTriangle(origin, dir, indices, vertices, triId, isect,
-                              numTriangles, numVertices) &
-            isect.t >= tNear & isect.t <= tFar & isect.t < closest.t;
-        closest.t = isNewClosest * isect.t + !isNewClosest * closest.t;
-        closest.triId =
-            isNewClosest * isect.triId + !isNewClosest * closest.triId;
-        closest.u = isNewClosest * isect.u + !isNewClosest * closest.u;
-        closest.v = isNewClosest * isect.v + !isNewClosest * closest.v;
-        triangleHit = isNewClosest | triangleHit;
+                              numTriangles, numVertices) &&
+            isect.t >= tNear && isect.t <= tFar && isect.t < closest.t;
+        if (isNewClosest) closest = isect;
+        /*closest.t = isNewClosest * isect.t + !isNewClosest * closest.t;*/
+        /*closest.triId =*/
+        /*isNewClosest * isect.triId + !isNewClosest * closest.triId;*/
+        /*closest.u = isNewClosest * isect.u + !isNewClosest * closest.u;*/
+        /*closest.v = isNewClosest * isect.v + !isNewClosest * closest.v;*/
+        triangleHit = isNewClosest || triangleHit;
+#ifdef DEBUG_TRAVERSE
+        if (rayIdx == DEBUG_TRAVERSE_THREAD_ID && foundLeaf) {
+          printf("(%f, %d)", isect.t, isNewClosest);
+        }
+#endif
       }
-      objectHit = triangleHit & (closest.t >= tNear) & (closest.t <= tFar);
-      --stackEnd;
+#ifdef DEBUG_TRAVERSE
+      if (rayIdx == DEBUG_TRAVERSE_THREAD_ID && foundLeaf) {
+        printf("\n");
+      }
+#endif
+      objectHit = triangleHit && (closest.t >= tNear) && (closest.t <= tFar);
+      if (foundLeaf) --stackEnd;
+#ifdef DEBUG_TRAVERSE
+      if (rayIdx == DEBUG_TRAVERSE_THREAD_ID && foundLeaf) {
+        printf("[%08d]", currentId);
+        for (int i = 0; i < depth; ++i) printf("  ");
+        printf("hit = %d numPrimitives = %d offset = %d t_best = %f\n",
+               objectHit, numPrimitives, offset, closest.t);
+      }
+#endif
     }  // end of while (!(objectHit | stackEmpty))
+
+#ifdef DEBUG_TRAVERSE
+    if (rayIdx == DEBUG_TRAVERSE_THREAD_ID) {
+      printf("numNodes = %d numLeaves = %d\n", numNodes, numLeaves);
+    }
+#endif
     hits[rayIdx] = closest;
   } while (true);
 }
@@ -880,10 +1229,9 @@ void CUDAOctreeRenderer::traceOnDevice(int4* indices, float4* vertices) {
                       cudaMemcpyDeviceToHost));
   LOG(DEBUG) << "numNodes = " << numNodes << "\n";
   uint4* d_nodes;
-  CHK_CUDA(cudaMemcpy(&d_nodes, &(d_nodeStorage->nodes),
-                      sizeof(OctNode128*), cudaMemcpyDeviceToHost))
-  cudaBindTexture(0, texture_nodes, d_nodes,
-                  sizeof(OctNode128) * numNodes);
+  CHK_CUDA(cudaMemcpy(&d_nodes, &(d_nodeStorage->nodes), sizeof(OctNode128*),
+                      cudaMemcpyDeviceToHost))
+  cudaBindTexture(0, texture_nodes, d_nodes, sizeof(OctNode128) * numNodes);
   cudaBindTexture(0, texture_vertices, vertices,
                   scene.numVertices * sizeof(float4));
   cudaBindTexture(0, texture_indices, indices,
@@ -905,6 +1253,14 @@ void CUDAOctreeRenderer::traceOnDevice(int4* indices, float4* vertices) {
   bounds.max = make_float4(scene.bbmax, 0.0);
   float time;
   cudaEvent_t start_event, stop_event;
+#if 0 
+  size_t logLimit = 0;
+  cudaDeviceGetLimit(&logLimit, cudaLimitPrintfFifoSize);
+  printf("--->Old logLimit = %d\n", logLimit);
+  cudaDeviceSetLimit(cudaLimitPrintfFifoSize, 10 * logLimit);
+  cudaDeviceGetLimit(&logLimit, cudaLimitPrintfFifoSize);
+  printf("--->New logLimit = %d\n", logLimit);
+#endif
   CHK_CUDA(cudaEventCreate(&start_event));
   CHK_CUDA(cudaEventCreate(&stop_event));
   CHK_CUDA(cudaEventRecord(start_event, 0));
@@ -952,6 +1308,15 @@ void CUDAOctreeRenderer::shade() {
   for (size_t i = 0; i < numRays; i++) {
     if (hits[i].triId < 0) {
       image.pixel[i] = backgroundColor;
+#if 0 
+      int width = image.width;
+      int x = i % width;
+      int y = i / width;
+      if ((x > 200 && x < 300) && (y > 200 && y < 300)) {
+        image.pixel[i] = make_float3(1.0f, 0.0f, 0.0f);
+        std::cout << "i = " << i << "\n";
+      }
+#endif
     } else {
       if (hits[i].triId > scene.numTriangles) {
 #if 0

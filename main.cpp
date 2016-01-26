@@ -111,6 +111,14 @@ int main(int argc, char** argv) {
   char buildInputFile[2048];
   bool haveBuildInputFile = false;
   buildOptions.type = BuildOptions::BUILD_ON_DEVICE;
+#if 0
+  size_t logLimit = 0;
+  cudaDeviceGetLimit(&logLimit, cudaLimitPrintfFifoSize);
+  printf("Old logLimit = %d\n", logLimit);
+  cudaDeviceSetLimit(cudaLimitPrintfFifoSize, 10 * logLimit);
+  cudaDeviceGetLimit(&logLimit, cudaLimitPrintfFifoSize);
+  printf("New logLimit = %d\n", logLimit);
+#endif
   buildOptions.info = NULL;
 
   // parse arguments
@@ -138,7 +146,7 @@ int main(int argc, char** argv) {
     }
   }
 
-  int device = 1;
+  int device = 0;
   setupDevice(&device);
   std::cout << "Device = " << device << "\n";
   printDeviceInfo(device);
