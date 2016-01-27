@@ -58,11 +58,12 @@ class CUDAOctreeRenderer {
   void shade();
 
  protected:
-  void createRaysOrtho(Ray** d_rays, int* numRays);
-  void createRaysOrthoOnDevice(float x0, float y0, float z, float dx, float dy,
-                               int yOffset, int yStride, float4* d_rays);
-  inline int idivCeil(int x, int y) { return (x + y - 1) / y; }
   void loadScene();
+  void generateRays(uint32_t width, uint32_t height, float focal_distance,
+                    float fovx, float fovy, const float3& eye,
+                    const float3& center, const float3& up, bool sort,
+                    bool usePitched, float4** d_rays, int* numRays,
+                    size_t* pitch);
   void traceOnDevice(int4* indices, float4* vertices);
 
   ConfigLoader config;

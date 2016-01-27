@@ -1,37 +1,14 @@
-//
-// Copyright (c) 2013 NVIDIA Corporation.  All rights reserved.
-//
-// NVIDIA Corporation and its licensors retain all intellectual property and
-// proprietary rights in and to this software, related documentation and any
-// modifications thereto.  Any use, reproduction, disclosure or distribution of
-// this software and related documentation without an express license agreement
-// from NVIDIA Corporation is strictly prohibited.
-//
-// TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, THIS SOFTWARE IS PROVIDED
-//*AS IS* AND NVIDIA AND ITS SUPPLIERS DISCLAIM ALL WARRANTIES, EITHER EXPRESS
-// OR IMPLIED, INCLUDING, BUT NOT LIMITED TO, IMPLIED WARRANTIES OF
-// MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE.  IN NO EVENT SHALL
-// NVIDIA OR ITS SUPPLIERS BE LIABLE FOR ANY SPECIAL, INCIDENTAL, INDIRECT, OR
-// CONSEQUENTIAL DAMAGES WHATSOEVER (INCLUDING, WITHOUT LIMITATION, DAMAGES FOR
-// LOSS OF BUSINESS PROFITS, BUSINESS INTERRUPTION, LOSS OF BUSINESS
-// INFORMATION, OR ANY OTHER PECUNIARY LOSS) ARISING OUT OF THE USE OF OR
-// INABILITY TO USE THIS SOFTWARE, EVEN IF NVIDIA HAS BEEN ADVISED OF THE
-// POSSIBILITY OF SUCH DAMAGES
-//
-
-//-----------------------------------------------------------------------------
-//
-//  Minimal OptiX Prime usage demonstration
-//
-//-----------------------------------------------------------------------------
-
-#include <iostream>
 #include <cstdlib>
+#include <iostream>
+#include <sstream>
+#include <string>
+
 #include "configLoader.h"
 #include "cudaOctreeRenderer.h"
 
 using oct::BuildOptions;
 using oct::CUDAOctreeRenderer;
+using oct::ConfigLoader;
 
 void printUsageAndExit(const char* argv0) {
   std::cerr
@@ -123,6 +100,10 @@ int main(int argc, char** argv) {
 
   // parse arguments
   bool foundObj = false;
+  int width = -1;
+  int height = -1;
+  float fovx = -1;
+  float fovy = -1;
   for (int i = 1; i < argc; ++i) {
     std::string arg(argv[i]);
     if (arg == "-h" || arg == "--help") {
@@ -133,7 +114,30 @@ int main(int argc, char** argv) {
     } else if ((arg == "-o" || arg == "--output") && i + 1 < argc) {
       config.imageFilename = argv[++i];
     } else if ((arg == "-w" || arg == "--width") && i + 1 < argc) {
-      config.imageWidth = atoi(argv[++i]);
+      width = atoi(argv[++i]);
+    } else if ((arg == "-h" || arg == "--height") && i + 1 < argc) {
+      height = atoi(argv[++i]);
+    } else if (arg == "--fovx" && i + 1 < argc) {
+      fovx = atof(argv[++i]);
+    } else if (arg == "--fovy" && i + 1 < argc) {
+      fovy = atof(argv[++i]);
+    } else if (arg == "--focal_distance" && i + 1 < argc) {
+      config.focal_distance = atof(argv[++i]);
+    } else if (arg == "--eye" && i + 1 < argc) {
+      std::stringstream ss(argv[++i]);
+      char dummy = 0;
+      ss >> dummy >> config.eye.x >> dummy >> config.eye.y >> dummy >>
+          config.eye.z >> dummy;
+    } else if (arg == "--center" && i + 1 < argc) {
+      std::stringstream ss(argv[++i]);
+      char dummy = 0;
+      ss >> dummy >> config.center.x >> dummy >> config.center.y >> dummy >>
+          config.center.z >> dummy;
+    } else if (arg == "--up" && i + 1 < argc) {
+      std::stringstream ss(argv[++i]);
+      char dummy = 0;
+      ss >> dummy >> config.up.x >> dummy >> config.up.y >> dummy >>
+          config.up.z >> dummy;
     } else if (arg == "--build-input" && i + 1 < argc) {
       strcpy(buildInputFile, argv[++i]);
       buildOptions.info = buildInputFile;
@@ -145,6 +149,26 @@ int main(int argc, char** argv) {
       printUsageAndExit(argv[0]);
     }
   }
+
+  if (height == -1 && width == -1)
+    height = width = 512;
+  else if (width == -1)
+    width = height;
+  else
+    height = width;
+
+  config.imageWidth = width;
+  config.imageHeight = height;
+
+  if (fovx == -1 && fovy == -1)
+    fovx = fovy = 45.0;
+  else if (fovx == -1)
+    fovx = fovy;
+  else
+    fovy = fovx;
+
+  config.fovx = fovx;
+  config.fovy = fovy;
 
   int device = 0;
   setupDevice(&device);

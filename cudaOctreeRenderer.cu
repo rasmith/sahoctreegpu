@@ -32,7 +32,6 @@
 __device__ int nextRayIndex;
 
 //#define USE_TRACE_KERNEL_LAUNCH_BOUNDS
-texture<float4, 1, cudaReadModeElementType> texture_rays;
 texture<uint4, 1, cudaReadModeElementType> texture_nodes;
 texture<float4, 1, cudaReadModeElementType> texture_vertices;
 texture<int4, 1, cudaReadModeElementType> texture_indices;
@@ -176,19 +175,6 @@ double getTimeDiffMs(const struct timespec& start, const struct timespec& end) {
   double microsecond_diff = 1000000.0 * (end.tv_sec - start.tv_sec) +
                             end.tv_nsec / 1000.0 - start.tv_nsec / 1000.0;
   return microsecond_diff;
-}
-
-__global__ void createRaysOrthoKernel(int width, int height, float x0, float y0,
-                                      float z, float dx, float dy,
-                                      float4* d_rays) {
-  int rayx = threadIdx.x + blockIdx.x * blockDim.x;
-  int rayy = threadIdx.y + blockIdx.y * blockDim.y;
-  if (rayx >= width || rayy >= height) return;
-
-  int idx = rayx + rayy * width;
-  d_rays[2 * idx + 0] =
-      make_float4(x0 + rayx * dx, y0 + rayy * dy, z, 0);  // origin, tmin
-  d_rays[2 * idx + 1] = make_float4(0, 0, 1, 1e34f);      // dir, tmax
 }
 
 #ifdef UPDATE_HITS_SOA
@@ -344,12 +330,12 @@ inline __device__ bool intersectTriangle(const float4& origin,
                                          int numVertices) {
   const int4 tri = indices[triId];
   /*const int4 tri = tex1Dfetch(texture_indices, triId);*/
-  /*const float4 a = vertices[tri.x];*/
-  /*const float4 b = vertices[tri.y];*/
-  /*const float4 c = vertices[tri.z];*/
-  const float4 a = tex1Dfetch(texture_vertices, tri.x);
-  const float4 b = tex1Dfetch(texture_vertices, tri.y);
-  const float4 c = tex1Dfetch(texture_vertices, tri.z);
+  const float4 a = vertices[tri.x];
+  const float4 b = vertices[tri.y];
+  const float4 c = vertices[tri.z];
+  /*const float4 a = tex1Dfetch(texture_vertices, tri.x);*/
+  /*const float4 b = tex1Dfetch(texture_vertices, tri.y);*/
+  /*const float4 c = tex1Dfetch(texture_vertices, tri.z);*/
   const float4 e1 = b - a;
   const float4 e2 = c - a;
   const float4 pVec =
@@ -396,204 +382,6 @@ inline __device__ bool intersectTriangle(const float4& origin,
 #else
   return true;
 #endif
-}
-
-template <typename I, typename T>
-inline __device__ __host__ void permute3(const I* order, T* a) {
-  T tempT;
-  I tempOrder[3] = {order[0], order[1], order[2]};
-  I tempI;
-  bool lessThan = tempOrder[2] < tempOrder[1];
-  exchangeIf(lessThan, &tempT, a + 1, a + 2);
-  exchangeIf(lessThan, &tempI, tempOrder + 1, tempOrder + 2);
-  lessThan = tempOrder[1] < tempOrder[0];
-  exchangeIf(lessThan, &tempT, a, a + 1);
-  exchangeIf(lessThan, &tempI, tempOrder, tempOrder + 1);
-  lessThan = tempOrder[2] < tempOrder[1];
-  exchangeIf(lessThan, &tempT, a + 1, a + 2);
-  exchangeIf(lessThan, &tempI, tempOrder + 1, tempOrder + 2);
-};
-
-template <typename T, typename Comparator>
-inline __device__ __host__ void compareExchange(const Comparator& c, T* temp,
-                                                T* x, T* y) {
-  bool lessThan = c(*y, *x);
-  exchangeIf(lessThan, temp, x, y);
-}
-
-template <typename T, typename Comparator>
-inline __device__ __host__ void sort3(const Comparator& c, T* a) {
-  T temp;
-  compareExchange(c, &temp, a + 1, a + 2);
-  compareExchange(c, &temp, a, a + 1);
-  compareExchange(c, &temp, a + 1, a + 2);
-};
-
-inline __host__ __device__ __host__ void createEvents(
-    const float3* origin, const float3* direction, const float4& invDirection,
-    const float4& center, const float4& hit, float tNear, float tFar,
-    OctreeEvent* events, int16_t* N) {
-  // Compute the default entry point.
-  unsigned char xBit = (hit.x > center.x);
-  unsigned char yBit = (hit.y > center.y);
-  unsigned char zBit = (hit.z > center.z);
-  unsigned char octant = xBit | (yBit << 1) | (zBit << 2);
-
-  // Compute the t values for which the ray crosses each x, y, z intercept.
-  float4 diff_center_origin = make_float4(
-      center.x - origin->x, center.y - origin->y, center.z - origin->z, 0.0f);
-  float4 t = make_float4(diff_center_origin.x * invDirection.x,
-                         diff_center_origin.y * invDirection.y,
-                         diff_center_origin.z * invDirection.z, 0.0f);
-
-  // Create the events, unsorted.
-  OctreeEvent eventEntry = {OCTREE_EVENT_ENTRY, octant, tNear};
-  OctreeEvent eventX = {OCTREE_EVENT_X, 0x1, t.x};
-  OctreeEvent eventY = {OCTREE_EVENT_Y, 0x2, t.y};
-  OctreeEvent eventZ = {OCTREE_EVENT_Z, 0x4, t.z};
-  OctreeEvent eventExit = {OCTREE_EVENT_EXIT, 0, tFar};
-
-  events[1] = eventX;
-  events[2] = eventY;
-  events[3] = eventZ;
-
-  OctreeEvent* planarEvents = &events[1];
-
-  // Mask lookup table.
-
-  // Each event is compared and a value for each mask output is computed.
-  // This is necessary since some events could have equal t-intercepts.
-  // This means the ray hits some projection of the centroid in the x, y, z
-  // planes defined by the centroid: it hits (x, y, z), (x, y), (y, x),
-  // or (y, z).
-  //
-  // NOTE: if there is a case such as t_x == t_y and t_y == t_z, but
-  // t_x != t_z, this is treated as if t_x = t_y = t_z.
-  unsigned char equals_01 = (planarEvents[0].t == planarEvents[1].t);
-  unsigned char equals_02 = (planarEvents[0].t == planarEvents[2].t);
-  unsigned char equals_12 = (planarEvents[1].t == planarEvents[2].t);
-  unsigned char unique0 = (equals_01 | equals_02) ^ 0x1;
-  unsigned char unique1 = (equals_01 | equals_12) ^ 0x1;
-  unsigned char unique2 = (equals_02 | equals_12) ^ 0x1;
-
-  // Result of unique_* is:
-  // unique0 unique1 unique2   output index
-  //    0       0       0          000 = 0
-  //    0       0       1          001 = 1
-  //    0       1       0          010 = 2
-  //    1       0       0          011 = 3
-  //    1       1       1          100 = 4
-  //
-  // The mask lookup index in binary is: u'_2 u'_1 u'_0.
-  // This results in the sorted order of the output unique values and give
-  // an index that can be used to acces the mask lookup table.
-  // The equations for the u'_* values are:
-  //
-  // u'_2 = u_2 && u_1
-  // u'_1 = (u_2 || u_1) && !u_0
-  // u'_0 = (u_2 || u_0) && !u_1
-  unsigned char maskLookupIndex = ((unique0 & unique1) << 2) |
-                                  ((unique0 | unique1) & (unique2 ^ 0x1)) << 1 |
-                                  ((unique2 | unique0) & (unique1 ^ 0x1));
-  const unsigned char mask_X = 0x1;
-  const unsigned char mask_Y = 0x2;
-  const unsigned char mask_Z = 0x4;
-  const unsigned char mask_XY = mask_X | mask_Y;
-  const unsigned char mask_XZ = mask_X | mask_Z;
-  const unsigned char mask_YZ = mask_Y | mask_Z;
-  const unsigned char mask_XYZ = mask_X | mask_Y | mask_Z;
-  const unsigned char maskLookupTable[5][3] = {
-      {mask_XYZ, mask_XYZ, mask_XYZ},  // 000 - t_x, t_y, t_z all equal
-      {mask_XY, mask_XY, mask_Z},      // 001 - t_x == t_y only
-      {mask_XZ, mask_Y, mask_XZ},      // 010 - t_x == t_z only
-      {mask_X, mask_YZ, mask_YZ},      // 100 - t_y == t_z only
-      {mask_X, mask_Y, mask_Z}         // 111 - t_x, t_y, t_z all unique
-  };
-
-  // Permutation lookup table and permutation index.
-  // After sorting, validity is checked, and invalid entries must be permuted.
-  // The permutation is gotten by computing an index into a lookup table.
-  unsigned char check0 = isValidT(planarEvents[0].t, tNear, tFar);
-  unsigned char check1 = isValidT(planarEvents[1].t, tNear, tFar);
-  unsigned char check2 = isValidT(planarEvents[2].t, tNear, tFar);
-  // After validity check, need to check both uniqueness and validity to ensure
-  // each element is valid.  This is a conservative evaluation: if A and B are
-  // equal and one is invalid, then both are invalid.
-  unsigned char check01 = unique0 | unique1 | (check0 & check1);
-  unsigned char check02 = unique0 | unique2 | (check0 & check2);
-  unsigned char check12 = unique1 | unique2 | (check1 & check2);
-  // Final validity computed.  A is valid if the initial check is true
-  // and it is not equivalent to some other invalid value.
-  unsigned char validTable[3];
-  validTable[0] = check0 & check01 & check02;
-  validTable[1] = check1 & check01 & check12;
-  validTable[2] = check2 & check02 & check12;
-  const unsigned char permutationTable[8][3] = {
-      {0, 1, 2},  // 000
-      {1, 2, 0},  // 001
-      {1, 0, 2},  // 010
-      {2, 0, 1},  // 011
-      {0, 1, 2},  // 100
-      {0, 2, 1},  // 101
-      {0, 1, 2},  // 110
-      {0, 1, 2}   // 111
-  };
-
-  // Compute masks according to table.
-  planarEvents[0].mask = maskLookupTable[maskLookupIndex][0];
-  planarEvents[1].mask = maskLookupTable[maskLookupIndex][1];
-  planarEvents[2].mask = maskLookupTable[maskLookupIndex][2];
-
-  // Sort.
-  OctreeEventComparator comparator;
-  sort3(comparator, planarEvents);
-
-  // Compute the permutation index here.
-  // The index computation needs to be delayed, since the permutation table
-  // assumes events are in sorted order w.r.t t-values.
-  unsigned char permutationIndex = validTable[planarEvents[2].type] |
-                                   validTable[planarEvents[1].type] << 1 |
-                                   validTable[planarEvents[0].type] << 2;
-  // Shuffle according to table. Events that are duplicate or invalid
-  // will be shuffled to the end.  This is why sorted order is important.
-  permute3(permutationTable[permutationIndex], planarEvents);
-
-  // Compute number of internal events.
-  // Count 0 if valid_0
-  // Count 1 if:
-  //    valid_1 unique0 unique1 unique2 output
-  //      1         0       0       0       0
-  //                1       0       0       1
-  //                0       1       0       1
-  //                0       0       1       0
-  //                1       1       1       1
-  unsigned char k = validTable[0] + (validTable[1] & (unique0 | unique1)) +
-                    (validTable[2] & unique2);
-
-  // Write entry and exit events.
-  events[0] = eventEntry;
-  events[k + 1] = eventExit;
-
-  // Number of events total (including entry and exit).
-  int16_t Nevents = k + 2;
-  *N = Nevents;
-
-  // Compute entry mask. This should usually be 000, but if the ray hits
-  // an X, Y, or Z plane at the boundary of a node, then the mask needs
-  // to be different.  Computing the XOR of this mask with the bitwise
-  // representation of the octant gives the correct entry mask.
-  bool entryEqualsFirst = events[0].t == events[1].t;
-  bool isX = events[1].type == OCTREE_EVENT_X;
-  bool isY = events[1].type == OCTREE_EVENT_Y;
-  bool isZ = events[1].type == OCTREE_EVENT_Z;
-  unsigned char xMask =
-      Nevents > 2 & entryEqualsFirst & isX & (xBit | (direction->x < 0.0f));
-  unsigned char yMask =
-      Nevents > 2 & entryEqualsFirst & isY & (yBit | (direction->y < 0.0f));
-  unsigned char zMask =
-      Nevents > 2 & entryEqualsFirst & isZ & (zBit | (direction->z < 0.0f));
-  unsigned char mask = xMask | (yMask << 1) | (zMask << 2);
-  events[0].mask = events[0].mask ^ mask;
 }
 
 inline __host__ __device__ __host__ void createEvents0(
@@ -769,11 +557,6 @@ inline __device__ void intersectOctree(
       localNextRay[warpIdx] += WARP_SIZE;
       localRayCount[warpIdx] -= WARP_SIZE;
     }
-
-    /**reinterpret_cast<float4*>(&localRays[threadIdx.x]) =*/
-    /*tex1Dfetch(texture_rays, rayIdx * 2);*/
-    /**(reinterpret_cast<float4*>(&localRays[threadIdx.x]) + 1) =*/
-    /*tex1Dfetch(texture_rays, rayIdx * 2 + 1);*/
 
     // Initialize traversal.
     const float4 origin = rays[rayIdx * 2];
@@ -1072,41 +855,64 @@ CUDAOctreeRenderer::CUDAOctreeRenderer(const ConfigLoader& c,
   image.width = config.imageWidth;
 }
 
-void CUDAOctreeRenderer::createRaysOrtho(Ray** d_rays, int* numRays) {
-  float margin = 0.05f;
-  int yOffset = 0;
-  int yStride = 1;
+__global__ void generateRaysKernel(uint32_t width, uint32_t height, float fovx,
+                                   float fovy, float focal_distance, float3 eye,
+                                   float3 tangent, float3 up, float3 look,
+                                   float4* d_rays, size_t pitch) {
+  int tid = threadIdx.x + blockDim.x * blockIdx.x;
+  if (tid > width * height) return;
 
-  float3& bbmax = scene.bbmax;
-  float3& bbmin = scene.bbmin;
-  float3 bbspan = bbmax - bbmin;
+  // Compute parameters needed to get the ray direction.
+  // This is done in eye coordinates.
+  int x = tid % width;  // Get x coordinate in screen space.
+  float x_max = focal_distance * tan(fovx / 2.0f);    // Find maxiumum eye X.
+  float eye_x = ((2.0f * x) / width - 1.0f) * x_max;  // Get the eye space X.
+  int y = tid / width;  // Get the y coordinate in screen space.
+  float y_max = focal_distance * tan(fovy / 2.0f);     // Find maxiumum eye Y.
+  float eye_y = (1.0f - (1.0f * y) / height) * y_max;  // Get eye space Y.
 
-  // Set height according to aspect ratio of bounding box
-  image.height = (int)(image.width * bbspan.y / bbspan.x);
+  // Compute and set the origin and direction here.
+  float4* pos =
+      reinterpret_cast<float4*>(reinterpret_cast<char*>(d_rays) + pitch * y) +
+      2 * x;            // Get the location to the values we are going to set.
+  float3 origin = eye;  // World space origin is at the eye.
+  *pos = make_float4(origin, 0.0f);  // Set the origin.
+  float3 direction =
+      look + eye_x * tangent + eye_y * up;  // Get world space direction.
+  *(pos + 1) = make_float4(direction, NPP_MAXABS_32F);  // Set the direction.
+}
 
-  float dx = bbspan.x * (1 + 2 * margin) / image.width;
-  float dy = bbspan.y * (1 + 2 * margin) / image.height;
-  float x0 = bbmin.x - bbspan.x * margin + dx / 2;
-  float y0 = bbmin.y - bbspan.y * margin + dy / 2;
-  float z = bbmin.z - std::max(bbspan.z, 1.0f) * .001f;
-  int rows = idivCeil((image.height - yOffset), yStride);
-  int count = image.width * rows;
+void CUDAOctreeRenderer::generateRays(
+    uint32_t width, uint32_t height, float focal_distance, float fovx,
+    float fovy, const float3& eye, const float3& center, const float3& up,
+    bool sort, bool usePitched, float4** d_rays, int* numRays, size_t* pitch) {
+  image.width = width;
+  image.height = height;
 
-  // Allocate buffer for rays.
-  CHK_CUDA(cudaMalloc(d_rays, sizeof(Ray) * count));
+  *pitch = 2 * sizeof(float4) * width;
 
-  // Generate rays on device.
-  dim3 blockSize(32, 16);
-  dim3 gridSize(idivCeil(image.width, blockSize.x),
-                idivCeil(rows, blockSize.y));
-  std::cout << " width = " << image.width << " height = " << image.height
-            << " rows = " << rows << "\n";
-  createRaysOrthoKernel<<<gridSize, blockSize>>>(
-      image.width, rows, x0, y0 + dy * yOffset, z, dx, dy * yStride,
-      (float4*)*d_rays);
+  if (usePitched)
+    CHK_CUDA(cudaMallocPitch(d_rays, pitch, width, height))
+  else
+    CHK_CUDA(cudaMalloc(d_rays, sizeof(float4) * 2 * width * height));
+
+  *numRays = width * height;
+
+  // Compute warps and blocks.
+  uint32_t threadsPerBlock = 128;
+  uint32_t numBlocks = ((*numRays) + threadsPerBlock - 1) / threadsPerBlock;
+
+  // Compute left handed coordinate system camera orientation.
+  float3 z_axis = normalize(eye - center);  // We look down negative Z.
+  float3 x_axis = normalize(cross(normalize(up), z_axis));  // Get tangent.
+  float3 y_axis = normalize(cross(z_axis, x_axis));  // True up direction.
+
+  // Call our kernel.
+  generateRaysKernel<<<numBlocks, threadsPerBlock>>>(
+      width, height, fovx, fovy, focal_distance, eye, x_axis, y_axis, z_axis,
+      *d_rays, *pitch);
+
   CHK_CUDA(cudaDeviceSynchronize());
-
-  *numRays = count;
 }
 
 void CUDAOctreeRenderer::loadScene() {
@@ -1181,7 +987,7 @@ void CUDAOctreeRenderer::build(Octree<LAYOUT_AOS>* d_octree) {
 
 void CUDAOctreeRenderer::traceOnDevice(int4* indices, float4* vertices) {
   const int numThreadsPerBlock = THREADS_PER_BLOCK;
-  const int numWarps = 200;
+  const int numWarps = 32 * 5;
 
   cudaDeviceSetSharedMemConfig(cudaSharedMemBankSizeEightByte);
 
@@ -1189,26 +995,40 @@ void CUDAOctreeRenderer::traceOnDevice(int4* indices, float4* vertices) {
   const int numBlocks = (numWarps + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;
 
   // Allocate rays.
-  CHK_CUDA(cudaMalloc(&d_rays, sizeof(Ray) * numRays));
+  /*CHK_CUDA(cudaMalloc(&d_rays, sizeof(Ray) * numRays));*/
 
   // Generate rays.
-  createRaysOrtho(&d_rays, &numRays);
+  size_t rayPitch = image.width;
+  bool usePitched = false;
+  bool sort = false;
+  generateRays(image.width, image.height, config.focal_distance, config.fovx,
+               config.fovy, config.eye, config.center, config.up, sort,
+               usePitched, reinterpret_cast<float4**>(&d_rays), &numRays,
+               &rayPitch);
 
   // Allocate hits for results.
-  CHK_CUDA(cudaMalloc(&d_hits, sizeof(Hit) * numRays));
+  size_t hitPitch = image.width;
+  if (usePitched)
+    CHK_CUDA(cudaMallocPitch(&d_hits, &hitPitch, sizeof(Hit) * image.width,
+                             image.height))
+  else
+    CHK_CUDA(cudaMalloc(&d_hits, sizeof(Ray) * image.width * image.height));
+
   std::vector<Hit> initialHits(numRays);
   const Hit badHit = {0.0f, -1, 0.0f, 0.0f};
 
   // Initialize to non-hit.
   for (int i = 0; i < numRays; ++i) initialHits[i] = badHit;
-  CHK_CUDA(cudaMemcpy(d_hits, &initialHits[0], sizeof(Hit) * numRays,
-                      cudaMemcpyHostToDevice));
+  CHK_CUDA(cudaMemcpy2D(d_hits, hitPitch, &initialHits[0],
+                        sizeof(Hit) * image.width, image.width, image.height,
+                        cudaMemcpyHostToDevice));
 
   LOG(DEBUG) << "WARP_LOAD_FACTOR = " << WARP_LOAD_FACTOR
              << " WARPS_PER_BLOCK = " << WARPS_PER_BLOCK
              << " numRays = " << numRays << " numWarps = " << numWarps
              << " numThreadsPerBlock = " << numThreadsPerBlock
-             << " numBlocks = " << numBlocks
+             << " numBlocks = " << numBlocks << " hitPitch = " << hitPitch
+             << " rayPitch = " << rayPitch
              << " numThreads = " << numBlocks * THREADS_PER_BLOCK << "\n";
 
   Octree<LAYOUT_AOS>* d_octree = NULL;
@@ -1222,7 +1042,6 @@ void CUDAOctreeRenderer::traceOnDevice(int4* indices, float4* vertices) {
   LOG(DEBUG) << "Ray tracing...\n";
 
   // OK, let's bind textures.
-  cudaBindTexture(0, texture_rays, d_rays, numRays * sizeof(Ray));
   const NodeStorage<LAYOUT_AOS>* d_nodeStorage = d_octree->nodeStoragePtr();
   uint32_t numNodes = 0;
   CHK_CUDA(cudaMemcpy(&numNodes, &(d_nodeStorage->numNodes), sizeof(uint32_t),
