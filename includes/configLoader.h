@@ -1,4 +1,5 @@
 #pragma once
+#include <iostream>
 #include <string>
 
 #include <cuda.h>
@@ -34,4 +35,14 @@ class ConfigLoader {
   float3 center;
 };
 
-} // namespace oct
+inline std::ostream& operator<<(std::ostream& os, const ConfigLoader& config) {
+  os << "objFilename = " << config.objFilename
+     << " imageFilename = " << config.imageFilename
+     << " width = " << config.imageWidth << " height = " << config.imageHeight
+     << " fovx = " << config.fovx << " fovy = " << config.fovy
+     << " focal_distance = " << config.focal_distance << " eye = " << config.eye
+     << " up = " << config.up << " center = " << config.center;
+  return os;
+}
+
+}  // namespace oct

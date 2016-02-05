@@ -37,8 +37,22 @@ texture<float4, 1, cudaReadModeElementType> texture_vertices;
 texture<int4, 1, cudaReadModeElementType> texture_indices;
 texture<uint32_t, 1, cudaReadModeElementType> texture_references;
 
-namespace oct {
+#define GET_RAY_ORIGIN(rays, width, pitch, i)                               \
+  *(reinterpret_cast<const float4*>(reinterpret_cast<const char*>((rays)) + \
+                                    ((i) / (width)) * (pitch)) +            \
+    2 * ((i) % (width)))
 
+#define GET_RAY_DIRECTION(rays, width, pitch, i)                            \
+  *(reinterpret_cast<const float4*>(reinterpret_cast<const char*>((rays)) + \
+                                    ((i) / (width)) * (pitch)) +            \
+    2 * ((i) % (width)) + 1)
+
+#define SET_HIT(hits, width, pitch, i, x)                    \
+  *(reinterpret_cast<Hit*>(reinterpret_cast<char*>((hits)) + \
+                           ((i) / (width)) * (pitch)) +      \
+    ((i) % (width))) = x
+
+namespace oct {
 template <uint32_t N>
 __host__ __device__ inline uint32_t lg2() {
   return ((N >> 1) != 0) + lg2<(N >> 1)>();
@@ -63,26 +77,6 @@ struct Aabb4 {
   float4 min;
   float4 max;
 };
-
-std::ostream& operator<<(std::ostream& os, const float4& x) {
-  os << x.x << "  " << x.y << " " << x.z << " " << x.w;
-  return os;
-}
-
-std::ostream& operator<<(std::ostream& os, const int4& x) {
-  os << x.x << "  " << x.y << " " << x.z << " " << x.w;
-  return os;
-}
-
-std::ostream& operator<<(std::ostream& os, const float3& x) {
-  os << x.x << "  " << x.y << " " << x.z << " ";
-  return os;
-}
-
-std::ostream& operator<<(std::ostream& os, const int3& x) {
-  os << x.x << "  " << x.y << " " << x.z << " ";
-  return os;
-}
 
 std::ostream& operator<<(std::ostream& os, const Ray& r) {
   float3 origin = make_float3(r.ox, r.oy, r.oz);
@@ -291,6 +285,55 @@ __device__ __inline__ float max4(float a, float b, float c, float d) {
   return fmaxf(fmaxf(fmaxf(a, b), c), d);
 }
 
+#define DIVERGENCE_FREE_INSTERSECT_AABB
+inline __device__ __host__ bool intersectAabb(const float4& origin,
+                                              const float4& invDirection,
+                                              const Aabb4& bounds, float t0,
+                                              float t1, float* tNear,
+                                              float* tFar) {
+  const float4 localBounds[2] = {bounds.min, bounds.max};
+  const unsigned char s[3] = {invDirection.x < 0, invDirection.y < 0,
+                              invDirection.z < 0};
+#ifdef DIVERGENCE_FREE_INSTERSECT_AABB
+  float tN = (localBounds[s[0]].x - origin.x) * invDirection.x;
+  float tF = (localBounds[1 - s[0]].x - origin.x) * invDirection.x;
+#else
+  *tNear = (localBounds[s[0]].x - origin.x) * invDirection.x;
+  *tFar = (localBounds[1 - s[0]].x - origin.x) * invDirection.x;
+#endif
+  float tymin = (localBounds[s[1]].y - origin.y) * invDirection.y;
+  float tymax = (localBounds[1 - s[1]].y - origin.y) * invDirection.y;
+
+#ifdef DIVERGENCE_FREE_INSTERSECT_AABB
+  tN = max(tN, tymin);
+  tF = min(tF, tymax);
+#else
+  if (*tNear > tymax || tymin > *tFar) return false;
+  if (tymin > *tNear) *tNear = tymin;
+  if (tymax < *tFar) *tFar = tymax;
+#endif
+
+  float tzmin = (localBounds[s[2]].z - origin.z) * invDirection.z;
+  float tzmax = (localBounds[1 - s[2]].z - origin.z) * invDirection.z;
+
+#ifdef DIVERGENCE_FREE_INSTERSECT_AABB
+  tN = max(tN, tzmin);
+  tF = min(tF, tzmax);
+#else
+  if (*tNear > tzmax || tzmin > *tFar) return false;
+  if (tzmin > *tNear) *tNear = tzmin;
+  if (tzmax < *tFar) *tFar = tzmax;
+#endif
+
+#ifdef DIVERGENCE_FREE_INSTERSECT_AABB
+  *tNear = tN;
+  *tFar = tF;
+  return !(tN > tF);
+#else
+  return *tNear<t1&& * tFar> t0;
+#endif
+}
+
 inline __device__ bool intersectAabb2(const float4& origin,
                                       const float4& invDirection,
                                       const Aabb4& bounds, float t0, float t1,
@@ -400,9 +443,9 @@ inline __host__ __device__ __host__ void createEvents0(
   events[2].type = OCTREE_EVENT_Y;
   events[2].mask = 0x2;
   events[2].t = t.y;
-  events[2].type = OCTREE_EVENT_Z;
-  events[2].mask = 0x4;
-  events[2].t = t.z;
+  events[3].type = OCTREE_EVENT_Z;
+  events[3].mask = 0x4;
+  events[3].t = t.z;
   // Sort the planarEvents, so we can implement a front-to-back traversal.
   exchangeIf(
       !isValidT(events[2].t, tNear, tFar) |
@@ -481,10 +524,10 @@ inline float4 __device__ __host__ getSplitPoint(const OctNode128* node,
   return split_point;
 }
 
-//#define DEBUG_TRAVERSE
+/*#define DEBUG_TRAVERSE*/
 #ifdef DEBUG_TRAVERSE
 //#define DEBUG_TRAVERSE_THREAD_ID 389308
-#define DEBUG_TRAVERSE_THREAD_ID 190365
+#define DEBUG_TRAVERSE_THREAD_ID 124009
 //#define DEBUG_TRAVERSE_THREAD_ID 386858  // t = 0.485482
 #endif
 #define MAX_DEPTH 15
@@ -496,7 +539,8 @@ inline float4 __device__ __host__ getSplitPoint(const OctNode128* node,
 inline __device__ void intersectOctree(
     const float4* rays, const uint4* nodes, const float4* vertices,
     const int4* indices, const uint32_t* references, const Aabb4 bounds,
-    uint32_t numTriangles, uint32_t numVertices, uint32_t numRays, Hit* hits) {
+    uint32_t numTriangles, uint32_t numVertices, uint32_t numRays, Hit* hits,
+    int width, int height, size_t hitPitch, size_t rayPitch) {
   // NOTE:
   //    1) We need to examine 4 nodes per octree node.
   //    4) Because of (1), we create a stack of size:
@@ -536,6 +580,28 @@ inline __device__ void intersectOctree(
 
     // Get the next ray for this thread.
     int rayIdx = localNextRay[warpIdx] + laneId;
+#if 0
+    int x = rayIdx % width;
+    int y = rayIdx / width;
+    if (x == 300 && y == 300) {
+      const float4 o = GET_RAY_ORIGIN(rays, width, rayPitch, rayIdx);
+      const float4 d = GET_RAY_DIRECTION(rays, width, rayPitch, rayIdx);
+      uint32_t row_offset = (rayIdx / width) * rayPitch;
+      uint32_t col_offset = 2 * (rayIdx % width);
+      const float4* pos =
+          reinterpret_cast<const float4*>(reinterpret_cast<const char*>(rays) +
+                                          row_offset) +
+          col_offset;
+      printf(
+          "[%d] x = %d y = %d width = %d, pitch = %ld, pos = %lx, o = %f %f "
+          "%f, "
+          "d "
+          "= %f %f "
+          "%f\n",
+          tid, x, y, width, rayPitch, pos, o.x, o.y, o.z, d.x, d.y, d.z);
+    }
+#endif
+
 #ifdef DEBUG_TRAVERSE
     int numNodes = 0;
     int numLeaves = 0;
@@ -543,8 +609,8 @@ inline __device__ void intersectOctree(
     int depth = 0;
     depthStack[0] = 0;
     if (rayIdx == DEBUG_TRAVERSE_THREAD_ID) {
-      const float4 o = rays[rayIdx * 2];
-      const float4 d = rays[rayIdx * 2 + 1];
+      const float4 o = GET_RAY_ORIGIN(rays, width, rayPitch, rayIdx);
+      const float4 d = GET_RAY_DIRECTION(rays, width, rayPitch, rayIdx);
       printf("[%d] o = %f %f %f, d = %f %f %f\n", tid, o.x, o.y, o.z, d.x, d.y,
              d.z);
     }
@@ -559,8 +625,8 @@ inline __device__ void intersectOctree(
     }
 
     // Initialize traversal.
-    const float4 origin = rays[rayIdx * 2];
-    const float4 dir = rays[rayIdx * 2 + 1];
+    const float4 origin = GET_RAY_ORIGIN(rays, width, rayPitch, rayIdx);
+    const float4 dir = GET_RAY_DIRECTION(rays, width, rayPitch, rayIdx);
     const float4 invDirection =
         make_float4(1.0f / dir.x, 1.0f / dir.y, 1.0f / dir.z, 0.0f);
     int16_t stackEnd = 1;
@@ -580,11 +646,15 @@ inline __device__ void intersectOctree(
         intersectAabb2(origin, invDirection, aabbStack[0], 0.0f, NPP_MAXABS_32F,
                        &tNearStack[0], &tFarStack[0]);
 #ifdef DEBUG_TRAVERSE
+    int x = rayIdx % width;
+    int y = rayIdx / width;
     if (rayIdx == DEBUG_TRAVERSE_THREAD_ID) {
       printf(
-          "hitBounds = %d, objectHit = %d, stackEmpty = %d tNear = % f tFar = "
+          "x = %d, y = %d, hitBounds = %d, objectHit = %d, stackEmpty = %d "
+          "tNear = % f tFar "
+          "= "
           "% f\n",
-          hitBounds, objectHit, stackEmpty, tNearStack[0], tFarStack[0]);
+          x, y, hitBounds, objectHit, stackEmpty, tNearStack[0], tFarStack[0]);
     }
 #endif
 
@@ -824,7 +894,18 @@ inline __device__ void intersectOctree(
       printf("numNodes = %d numLeaves = %d\n", numNodes, numLeaves);
     }
 #endif
-    hits[rayIdx] = closest;
+#if 0 
+    if (x == 300 && y == 300) {
+      printf("hitPitch = %ld\n", hitPitch);
+    }
+#endif
+    SET_HIT(hits, width, hitPitch, rayIdx, closest);
+#ifdef DEBUG_TRAVERSE
+    if (rayIdx == DEBUG_TRAVERSE_THREAD_ID) {
+      printf("[%d] t=%f triId=%d u=%f v=%f hit=%d\n", rayIdx, closest.t,
+             closest.triId, closest.u, closest.v, objectHit);
+    }
+#endif
   } while (true);
 }
 
@@ -838,9 +919,12 @@ __global__
                          const __restrict__ int4* indices,
                          const __restrict__ uint32_t* references,
                          const Aabb4 bounds, uint32_t numTriangles,
-                         uint32_t numVertices, uint32_t numRays, Hit* hits) {
+                         uint32_t numVertices, uint32_t numRays, Hit* hits,
+                         int width, int height, size_t hitPitch,
+                         size_t rayPitch) {
   intersectOctree(rays, nodes, vertices, indices, references, bounds,
-                  numTriangles, numVertices, numRays, hits);
+                  numTriangles, numVertices, numRays, hits, width, height,
+                  hitPitch, rayPitch);
 }
 
 CUDAOctreeRenderer::CUDAOctreeRenderer(const ConfigLoader& c) : config(c) {
@@ -865,20 +949,23 @@ __global__ void generateRaysKernel(uint32_t width, uint32_t height, float fovx,
   // Compute parameters needed to get the ray direction.
   // This is done in eye coordinates.
   int x = tid % width;  // Get x coordinate in screen space.
-  float x_max = focal_distance * tan(fovx / 2.0f);    // Find maxiumum eye X.
-  float eye_x = ((2.0f * x) / width - 1.0f) * x_max;  // Get the eye space X.
-  int y = tid / width;  // Get the y coordinate in screen space.
-  float y_max = focal_distance * tan(fovy / 2.0f);     // Find maxiumum eye Y.
-  float eye_y = (1.0f - (1.0f * y) / height) * y_max;  // Get eye space Y.
+  float x_max =
+      focal_distance * tan(M_PI * fovx / 360.0f);  // Find maxiumum eye X.
+  float u = (2.0f * x) / width - 1.0f;
+  float eye_x = u * x_max;  // Get the eye space X.
+  int y = tid / width;      // Get the y coordinate in screen space.
+  float y_max =
+      focal_distance * tan(M_PI * fovy / 360.0f);  // Find maxiumum eye Y.
+  float v = (2.0f * y) / height - 1.0f;
+  float eye_y = v * y_max;  // Get eye space Y.
 
   // Compute and set the origin and direction here.
   float4* pos =
       reinterpret_cast<float4*>(reinterpret_cast<char*>(d_rays) + pitch * y) +
-      2 * x;            // Get the location to the values we are going to set.
-  float3 origin = eye;  // World space origin is at the eye.
+      2 * x;  // Get the location to the values we are going to set.
+  float3 origin = eye - focal_distance * look + eye_x * tangent + eye_y * up;
   *pos = make_float4(origin, 0.0f);  // Set the origin.
-  float3 direction =
-      look + eye_x * tangent + eye_y * up;  // Get world space direction.
+  float3 direction = normalize(origin - eye);
   *(pos + 1) = make_float4(direction, NPP_MAXABS_32F);  // Set the direction.
 }
 
@@ -892,7 +979,7 @@ void CUDAOctreeRenderer::generateRays(
   *pitch = 2 * sizeof(float4) * width;
 
   if (usePitched)
-    CHK_CUDA(cudaMallocPitch(d_rays, pitch, width, height))
+    CHK_CUDA(cudaMallocPitch(d_rays, pitch, width * sizeof(float4) * 2, height))
   else
     CHK_CUDA(cudaMalloc(d_rays, sizeof(float4) * 2 * width * height));
 
@@ -906,6 +993,9 @@ void CUDAOctreeRenderer::generateRays(
   float3 z_axis = normalize(eye - center);  // We look down negative Z.
   float3 x_axis = normalize(cross(normalize(up), z_axis));  // Get tangent.
   float3 y_axis = normalize(cross(z_axis, x_axis));  // True up direction.
+  printf("tangent = %f %f %f up = %f %f %f look = %f %f %f\n", x_axis.x,
+         x_axis.y, x_axis.z, y_axis.x, y_axis.y, y_axis.z, z_axis.x, z_axis.y,
+         z_axis.z);
 
   // Call our kernel.
   generateRaysKernel<<<numBlocks, threadsPerBlock>>>(
@@ -998,16 +1088,18 @@ void CUDAOctreeRenderer::traceOnDevice(int4* indices, float4* vertices) {
   /*CHK_CUDA(cudaMalloc(&d_rays, sizeof(Ray) * numRays));*/
 
   // Generate rays.
-  size_t rayPitch = image.width;
-  bool usePitched = false;
+  size_t rayPitch = image.width * sizeof(float4) * 2;
+  bool usePitched = true;
   bool sort = false;
+  image.width = config.imageWidth;
+  image.height = config.imageHeight;
   generateRays(image.width, image.height, config.focal_distance, config.fovx,
                config.fovy, config.eye, config.center, config.up, sort,
                usePitched, reinterpret_cast<float4**>(&d_rays), &numRays,
                &rayPitch);
 
   // Allocate hits for results.
-  size_t hitPitch = image.width;
+  size_t hitPitch = image.width * sizeof(Hit);
   if (usePitched)
     CHK_CUDA(cudaMallocPitch(&d_hits, &hitPitch, sizeof(Hit) * image.width,
                              image.height))
@@ -1020,8 +1112,8 @@ void CUDAOctreeRenderer::traceOnDevice(int4* indices, float4* vertices) {
   // Initialize to non-hit.
   for (int i = 0; i < numRays; ++i) initialHits[i] = badHit;
   CHK_CUDA(cudaMemcpy2D(d_hits, hitPitch, &initialHits[0],
-                        sizeof(Hit) * image.width, image.width, image.height,
-                        cudaMemcpyHostToDevice));
+                        sizeof(Hit) * image.width, sizeof(Hit) * image.width,
+                        image.height, cudaMemcpyHostToDevice));
 
   LOG(DEBUG) << "WARP_LOAD_FACTOR = " << WARP_LOAD_FACTOR
              << " WARPS_PER_BLOCK = " << WARPS_PER_BLOCK
@@ -1086,7 +1178,7 @@ void CUDAOctreeRenderer::traceOnDevice(int4* indices, float4* vertices) {
   traceKernel<<<numBlocks, numThreadsPerBlock>>>(
       reinterpret_cast<float4*>(d_rays), d_nodes, vertices, indices,
       d_references, bounds, scene.numTriangles, scene.numVertices, numRays,
-      d_hits);
+      d_hits, image.width, image.height, hitPitch, rayPitch);
   CHK_CUDA(cudaEventRecord(stop_event, 0));
   CHK_CUDA(cudaEventSynchronize(stop_event));
   cudaEventElapsedTime(&time, start_event, stop_event);
@@ -1110,8 +1202,13 @@ void CUDAOctreeRenderer::traceOnDevice(int4* indices, float4* vertices) {
 
   // Copy hits locally.
   localHits.resize(numRays);
-  CHK_CUDA(cudaMemcpy(&localHits[0], d_hits, sizeof(Hit) * numRays,
-                      cudaMemcpyDeviceToHost));
+  if (usePitched)
+    CHK_CUDA(cudaMemcpy2D(&localHits[0], hitPitch, d_hits,
+                          sizeof(Hit) * image.width, sizeof(Hit) * image.width,
+                          image.height, cudaMemcpyDeviceToHost))
+  else
+    CHK_CUDA(cudaMemcpy(&localHits[0], d_hits, sizeof(Hit) * numRays,
+                        cudaMemcpyDeviceToHost));
 
   CHK_CUDA(cudaFree(d_hits));
   CHK_CUDA(cudaFree(d_rays));
@@ -1127,13 +1224,13 @@ void CUDAOctreeRenderer::shade() {
   for (size_t i = 0; i < numRays; i++) {
     if (hits[i].triId < 0) {
       image.pixel[i] = backgroundColor;
-#if 0 
+#if 0
       int width = image.width;
       int x = i % width;
       int y = i / width;
-      if ((x > 200 && x < 300) && (y > 200 && y < 300)) {
+      if ((x > 100 && x < 106) && (y > 200 && y < 250)) {
         image.pixel[i] = make_float3(1.0f, 0.0f, 0.0f);
-        std::cout << "i = " << i << "\n";
+        /*std::cout << "i = " << i << " x = " << x << " y = " << y << "\n";*/
       }
 #endif
     } else {

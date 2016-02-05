@@ -8,12 +8,14 @@ set(EXECUTABLE_OUTPUT_PATH ${PROJECT_BINARY_DIR}/bin)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/includes)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/third_party/glm)
 
-find_package(CUDA 7.5 REQUIRED)
+find_package(CUDA 6.5 REQUIRED)
 include_directories(${CUDA_INCLUDE_DIRS}) 
 
 #set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS};--keep;-G;-g;-lineinfo;-Xptxas;-v")
 set(CUDA_NVCC_FLAGS 
-  "${CUDA_NVCC_FLAGS};-Xptxas;-v;--use_fast_math;-O3;-arch=sm_20;")
+  "${CUDA_NVCC_FLAGS};-Xptxas;-v;\
+--use_fast_math;-arch=sm_20;--compiler-options '-O3'
+")
 
 #set(CUDA_SEPARABLE_COMPILATION ON)
 

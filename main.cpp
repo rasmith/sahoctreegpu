@@ -87,6 +87,7 @@ int main(int argc, char** argv) {
   BuildOptions buildOptions;
   char buildInputFile[2048];
   bool haveBuildInputFile = false;
+  int device = -1;
   buildOptions.type = BuildOptions::BUILD_ON_DEVICE;
 #if 0
   size_t logLimit = 0;
@@ -144,6 +145,8 @@ int main(int argc, char** argv) {
       haveBuildInputFile = true;
     } else if (arg == "--build-type" && i + 1 < argc) {
       BuildOptions::stringToBuildOptionType(argv[++i], &buildOptions.type);
+    } else if (arg == "--device" && i + 1 < argc) {
+      device = atoi(argv[++i]);
     } else {
       std::cerr << "Bad option: '" << arg << "'" << std::endl;
       printUsageAndExit(argv[0]);
@@ -170,11 +173,6 @@ int main(int argc, char** argv) {
   config.fovx = fovx;
   config.fovy = fovy;
 
-  int device = 0;
-  setupDevice(&device);
-  std::cout << "Device = " << device << "\n";
-  printDeviceInfo(device);
-
   if (!foundObj) {
     std::cerr << ".obj file not found\n";
     printUsageAndExit(argv[0]);
@@ -185,6 +183,13 @@ int main(int argc, char** argv) {
     std::cerr << "Building from file specified but no input file given!\n";
     printUsageAndExit(argv[0]);
   }
+
+  if (device == -1) device = 0;
+  setupDevice(&device);
+  std::cout << "Device = " << device << "\n";
+  printDeviceInfo(device);
+
+  std::cout << "config = " << config << "\n";
 
   CUDAOctreeRenderer renderer(config, buildOptions);
   std::cout << "Rendering...\n";
