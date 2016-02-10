@@ -103,8 +103,7 @@ int main(int argc, char** argv) {
   bool foundObj = false;
   int width = -1;
   int height = -1;
-  float fovx = -1;
-  float fovy = -1;
+  float fov = -1;
   for (int i = 1; i < argc; ++i) {
     std::string arg(argv[i]);
     if (arg == "-h" || arg == "--help") {
@@ -118,10 +117,8 @@ int main(int argc, char** argv) {
       width = atoi(argv[++i]);
     } else if ((arg == "-h" || arg == "--height") && i + 1 < argc) {
       height = atoi(argv[++i]);
-    } else if (arg == "--fovx" && i + 1 < argc) {
-      fovx = atof(argv[++i]);
-    } else if (arg == "--fovy" && i + 1 < argc) {
-      fovy = atof(argv[++i]);
+    } else if (arg == "--fov" && i + 1 < argc) {
+      fov = atof(argv[++i]);
     } else if (arg == "--focal_distance" && i + 1 < argc) {
       config.focal_distance = atof(argv[++i]);
     } else if (arg == "--eye" && i + 1 < argc) {
@@ -153,25 +150,23 @@ int main(int argc, char** argv) {
     }
   }
 
+  std::cout << "width = " << width << " height = " << height << "\n";
   if (height == -1 && width == -1)
     height = width = 512;
   else if (width == -1)
     width = height;
-  else
+  else if (height == -1)
     height = width;
 
+  std::cout << "width = " << width << " height = " << height << "\n";
   config.imageWidth = width;
   config.imageHeight = height;
 
-  if (fovx == -1 && fovy == -1)
-    fovx = fovy = 45.0;
-  else if (fovx == -1)
-    fovx = fovy;
-  else
-    fovy = fovx;
+  float aspect = (1.0f * width) / height;
+  float d = config.focal_distance;
+  if (fov == -1) fov = 45.0;
 
-  config.fovx = fovx;
-  config.fovy = fovy;
+  config.fov = fov;
 
   if (!foundObj) {
     std::cerr << ".obj file not found\n";

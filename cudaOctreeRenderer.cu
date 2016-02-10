@@ -27,7 +27,7 @@
 #define MAX_BLOCKS_PER_DIMENSION 65535
 //#define UPDATE_HITS_SOA
 
-#define WARP_LOAD_FACTOR 2  // This is effectively #rays / threads
+#define WARP_LOAD_FACTOR 3  // This is effectively #rays / threads
 #define WARP_BATCH_SIZE (WARP_LOAD_FACTOR * WARP_SIZE)  // #rays / warp batch
 __device__ int nextRayIndex;
 
@@ -939,40 +939,83 @@ CUDAOctreeRenderer::CUDAOctreeRenderer(const ConfigLoader& c,
   image.width = config.imageWidth;
 }
 
-__global__ void generateRaysKernel(uint32_t width, uint32_t height, float fovx,
-                                   float fovy, float focal_distance, float3 eye,
+__global__ void generateRaysKernel(uint32_t width, uint32_t height, float fov,
+                                   float focal_distance, float3 eye,
                                    float3 tangent, float3 up, float3 look,
                                    float4* d_rays, size_t pitch) {
-  int tid = threadIdx.x + blockDim.x * blockIdx.x;
-  if (tid > width * height) return;
+  const uint32_t tid = threadIdx.x + blockDim.x * blockIdx.x;
+  const uint32_t warpId = tid / WARP_SIZE;       // get our warpId
+  const unsigned char laneId = tid % WARP_SIZE;  // get our warp index
+  const uint32_t warpIdx = warpId % WARPS_PER_BLOCK;
+  const uint32_t numRays = width * height;
+  __shared__ volatile int localRayCount[WARPS_PER_BLOCK];
+  __shared__ volatile int localNextRay[WARPS_PER_BLOCK];
 
-  // Compute parameters needed to get the ray direction.
-  // This is done in eye coordinates.
-  int x = tid % width;  // Get x coordinate in screen space.
-  float x_max =
-      focal_distance * tan(M_PI * fovx / 360.0f);  // Find maxiumum eye X.
-  float u = (2.0f * x) / width - 1.0f;
-  float eye_x = u * x_max;  // Get the eye space X.
-  int y = tid / width;      // Get the y coordinate in screen space.
-  float y_max =
-      focal_distance * tan(M_PI * fovy / 360.0f);  // Find maxiumum eye Y.
-  float v = (2.0f * y) / height - 1.0f;
-  float eye_y = v * y_max;  // Get eye space Y.
+  localNextRay[warpIdx] = 0;
+  localRayCount[warpIdx] = 0;
 
-  // Compute and set the origin and direction here.
-  float4* pos =
-      reinterpret_cast<float4*>(reinterpret_cast<char*>(d_rays) + pitch * y) +
-      2 * x;  // Get the location to the values we are going to set.
-  float3 origin = eye - focal_distance * look + eye_x * tangent + eye_y * up;
-  *pos = make_float4(origin, 0.0f);  // Set the origin.
-  float3 direction = normalize(origin - eye);
-  *(pos + 1) = make_float4(direction, NPP_MAXABS_32F);  // Set the direction.
+  do {
+    // If we are the first thread in the warp, check our work status
+    // and add more work if needed.
+    if (laneId == 0 && localRayCount[warpIdx] <= 0) {
+      localNextRay[warpIdx] = atomicAdd(&nextRayIndex, WARP_BATCH_SIZE);
+      localRayCount[warpIdx] = WARP_BATCH_SIZE;
+    }
+
+    // Get the next ray for this thread.
+    int rayIdx = localNextRay[warpIdx] + laneId;
+
+    bool goodThread = rayIdx < numRays;
+    if (!goodThread) break;
+
+    // Update counts and next ray to get.
+    if (laneId == 0) {
+      localNextRay[warpIdx] += WARP_SIZE;
+      localRayCount[warpIdx] -= WARP_SIZE;
+    }
+
+    // Compute parameters needed to get the ray direction.
+    // This is done in eye coordinates.
+    int y = rayIdx / width;  // Get the y coordinate in screen space.
+    float y_max = focal_distance *
+                  tan(((M_PI / 180.0f) * fov) / 2.0f);  // Find maxiumum eye Y.
+    float v = (2.0f * y) / height - 1.0f;
+    float eye_y = v * y_max;  // Get eye space Y.
+    int x = rayIdx % width;   // Get x coordinate in screen space.
+    float aspect = (1.0f * width) / height;
+    float x_max = aspect * y_max;
+    float u = (2.0f * x) / width - 1.0f;
+    float eye_x = u * x_max;  // Get the eye space X.
+
+    // Compute and set the origin and direction here.
+    float4* pos =
+        reinterpret_cast<float4*>(reinterpret_cast<char*>(d_rays) + pitch * y) +
+        2 * x;  // Get the location to the values we are going to set.
+    float3 origin = eye - focal_distance * look + eye_x * tangent + eye_y * up;
+    *pos = make_float4(origin, 0.0f);  // Set the origin.
+    float3 direction = normalize(origin - eye);
+    *(pos + 1) = make_float4(direction, NPP_MAXABS_32F);  // Set the direction.
+  } while (true);
 }
 
-void CUDAOctreeRenderer::generateRays(
-    uint32_t width, uint32_t height, float focal_distance, float fovx,
-    float fovy, const float3& eye, const float3& center, const float3& up,
-    bool sort, bool usePitched, float4** d_rays, int* numRays, size_t* pitch) {
+void CUDAOctreeRenderer::sortRays(uint32_t width, bool usePitched, int numRays,
+                                  size_t* rankInOutPitch, float4* d_rays,
+                                  int2** d_rank_in_out) {
+  // Get the allocation out of the way.
+  *rankInOutPitch = 2 * sizeof(int2) * width;
+  if (usePitched)
+    CHK_CUDA(cudaMallocPitch(d_rank_in_out, rankInOutPitch,
+                             width * sizeof(int2) * 2, height))
+  else
+    CHK_CUDA(cudaMalloc(d_rank_in_out, sizeof(int2) * 2 * width * height));
+}
+
+void CUDAOctreeRenderer::generateRays(uint32_t width, uint32_t height,
+                                      float focal_distance, float fov,
+                                      const float3& eye, const float3& center,
+                                      const float3& up, bool sort,
+                                      bool usePitched, float4** d_rays,
+                                      int* numRays, size_t* pitch) {
   image.width = width;
   image.height = height;
 
@@ -985,9 +1028,19 @@ void CUDAOctreeRenderer::generateRays(
 
   *numRays = width * height;
 
+  // Set memory configuration.
+  cudaDeviceSetSharedMemConfig(cudaSharedMemBankSizeEightByte);
+
   // Compute warps and blocks.
-  uint32_t threadsPerBlock = 128;
-  uint32_t numBlocks = ((*numRays) + threadsPerBlock - 1) / threadsPerBlock;
+  const int numWarps = 32 * 5;
+  const uint32_t numThreadsPerBlock = THREADS_PER_BLOCK;
+  const uint32_t numBlocks = (numWarps + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;
+
+  // Initialize global state.
+  uint32_t nextRay = 0;
+  CHK_CUDA(cudaMemcpyToSymbol(nextRayIndex, &nextRay, sizeof(uint32_t)));
+
+  // Intialize some local state.
 
   // Compute left handed coordinate system camera orientation.
   float3 z_axis = normalize(eye - center);  // We look down negative Z.
@@ -998,9 +1051,9 @@ void CUDAOctreeRenderer::generateRays(
          z_axis.z);
 
   // Call our kernel.
-  generateRaysKernel<<<numBlocks, threadsPerBlock>>>(
-      width, height, fovx, fovy, focal_distance, eye, x_axis, y_axis, z_axis,
-      *d_rays, *pitch);
+  generateRaysKernel<<<numBlocks, numThreadsPerBlock>>>(
+      width, height, fov, focal_distance, eye, x_axis, y_axis, z_axis, *d_rays,
+      *pitch);
 
   CHK_CUDA(cudaDeviceSynchronize());
 }
@@ -1093,10 +1146,9 @@ void CUDAOctreeRenderer::traceOnDevice(int4* indices, float4* vertices) {
   bool sort = false;
   image.width = config.imageWidth;
   image.height = config.imageHeight;
-  generateRays(image.width, image.height, config.focal_distance, config.fovx,
-               config.fovy, config.eye, config.center, config.up, sort,
-               usePitched, reinterpret_cast<float4**>(&d_rays), &numRays,
-               &rayPitch);
+  generateRays(image.width, image.height, config.focal_distance, config.fov,
+               config.eye, config.center, config.up, sort, usePitched,
+               reinterpret_cast<float4**>(&d_rays), &numRays, &rayPitch);
 
   // Allocate hits for results.
   size_t hitPitch = image.width * sizeof(Hit);
@@ -1162,7 +1214,8 @@ void CUDAOctreeRenderer::traceOnDevice(int4* indices, float4* vertices) {
   Aabb4 bounds;
   bounds.min = make_float4(scene.bbmin, 0.0);
   bounds.max = make_float4(scene.bbmax, 0.0);
-  float time;
+  float time = 0.0f;
+  float avg_time = 0.0f;
   cudaEvent_t start_event, stop_event;
 #if 0 
   size_t logLimit = 0;
@@ -1172,24 +1225,33 @@ void CUDAOctreeRenderer::traceOnDevice(int4* indices, float4* vertices) {
   cudaDeviceGetLimit(&logLimit, cudaLimitPrintfFifoSize);
   printf("--->New logLimit = %d\n", logLimit);
 #endif
-  CHK_CUDA(cudaEventCreate(&start_event));
-  CHK_CUDA(cudaEventCreate(&stop_event));
-  CHK_CUDA(cudaEventRecord(start_event, 0));
-  traceKernel<<<numBlocks, numThreadsPerBlock>>>(
-      reinterpret_cast<float4*>(d_rays), d_nodes, vertices, indices,
-      d_references, bounds, scene.numTriangles, scene.numVertices, numRays,
-      d_hits, image.width, image.height, hitPitch, rayPitch);
-  CHK_CUDA(cudaEventRecord(stop_event, 0));
-  CHK_CUDA(cudaEventSynchronize(stop_event));
-  cudaEventElapsedTime(&time, start_event, stop_event);
+  int warmup_trials = 10;
+  int run_trials = 10;
+  int total_trials = warmup_trials + run_trials;
+  for (int i = 0; i < total_trials; ++i) {
+    nextRay = 0;
+    CHK_CUDA(cudaMemcpyToSymbol(nextRayIndex, &nextRay, sizeof(uint32_t)));
+    CHK_CUDA(cudaEventCreate(&start_event));
+    CHK_CUDA(cudaEventCreate(&stop_event));
+    CHK_CUDA(cudaEventRecord(start_event, 0));
+    traceKernel<<<numBlocks, numThreadsPerBlock>>>(
+        reinterpret_cast<float4*>(d_rays), d_nodes, vertices, indices,
+        d_references, bounds, scene.numTriangles, scene.numVertices, numRays,
+        d_hits, image.width, image.height, hitPitch, rayPitch);
+    CHK_CUDA(cudaEventRecord(stop_event, 0));
+    CHK_CUDA(cudaEventSynchronize(stop_event));
+    cudaEventElapsedTime(&time, start_event, stop_event);
+    if (i >= warmup_trials) avg_time += time;
+  }
+  avg_time /= run_trials;
 
   LOG(DEBUG) << "Done...\n";
-  LOG(DEBUG) << "Elapsed time = " << time * 1000.0 << " microsec"
-             << ", " << time << " millisec\n";
-  float ns_per_ray = 1000000.0 * time / numRays;
+  LOG(DEBUG) << "Average time = " << avg_time * 1000.0 << " microsec"
+             << ", " << avg_time << " millisec\n";
+  float ns_per_ray = 1000000.0 * avg_time / numRays;
   LOG(DEBUG) << "Traced " << numRays << " rays at " << ns_per_ray
              << " nanoseconds per ray\n";
-  float mrays_sec = numRays / (1000.0 * time);
+  float mrays_sec = numRays / (1000.0 * avg_time);
   LOG(DEBUG) << "Rate is " << mrays_sec << " million rays per second.\n";
   Octree<LAYOUT_AOS>::freeOnGpu(d_octree);
   CHK_CUDA(cudaFree((void*)(d_octree)));

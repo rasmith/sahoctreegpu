@@ -17,8 +17,7 @@ class ConfigLoader {
         imageFilename("output.ppm"),
         imageWidth(512),
         imageHeight(512),
-        fovx(45.0f),
-        fovy(45.0f),
+        fov(45.0f),
         focal_distance(1.0f),
         eye(make_float3(0.0f, 0.0f, -1.0f)),
         up(make_float3(0.0f, 1.0f, 0.0f)),
@@ -27,8 +26,7 @@ class ConfigLoader {
   std::string imageFilename;
   int imageWidth;
   int imageHeight;
-  float fovy;
-  float fovx;
+  float fov;
   float focal_distance;
   float3 eye;
   float3 up;
@@ -39,9 +37,9 @@ inline std::ostream& operator<<(std::ostream& os, const ConfigLoader& config) {
   os << "objFilename = " << config.objFilename
      << " imageFilename = " << config.imageFilename
      << " width = " << config.imageWidth << " height = " << config.imageHeight
-     << " fovx = " << config.fovx << " fovy = " << config.fovy
-     << " focal_distance = " << config.focal_distance << " eye = " << config.eye
-     << " up = " << config.up << " center = " << config.center;
+     << " fov = " << config.fov << " focal_distance = " << config.focal_distance
+     << " eye = " << config.eye << " up = " << config.up
+     << " center = " << config.center;
   return os;
 }
 
