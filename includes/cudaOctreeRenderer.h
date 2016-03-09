@@ -59,6 +59,9 @@ class CUDAOctreeRenderer {
 
  protected:
   void loadScene();
+  void sortRays(uint32_t width, uint32_t height, bool usePitched,
+                size_t* rankPitch, float4* d_rays_in, float4* d_rays_out,
+                int** d_ranks);
   void generateRays(uint32_t width, uint32_t height, float focal_distance,
                     float fov, const float3& eye, const float3& center,
                     const float3& up, bool sort, bool usePitched,

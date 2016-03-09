@@ -998,16 +998,117 @@ __global__ void generateRaysKernel(uint32_t width, uint32_t height, float fov,
   } while (true);
 }
 
-void CUDAOctreeRenderer::sortRays(uint32_t width, bool usePitched, int numRays,
-                                  size_t* rankInOutPitch, float4* d_rays,
-                                  int2** d_rank_in_out) {
+__global__ void computeRanksKernel(uint32_t width, bool usePitched,
+                                   size_t numRays, size_t rankPitch,
+                                   float4* d_rays, int* ranks) {}
+
+__global__ void computeRanks(uint32_t width, bool usePitched, int numRays,
+                             size_t* rankPitch, float4* d_rays, int* ranks,
+                             bool direction) {
+  const uint32_t tid = threadIdx.x + blockDim.x * blockIdx.x;
+  const uint32_t warpId = tid / WARP_SIZE;       // get our warpId
+  const unsigned char laneId = tid % WARP_SIZE;  // get our warp index
+  const uint32_t warpIdx = warpId % WARPS_PER_BLOCK;
+  __shared__ volatile int localRayCount[WARPS_PER_BLOCK];
+  __shared__ volatile int localNextRay[WARPS_PER_BLOCK];
+
+  localNextRay[warpIdx] = 0;
+  localRayCount[warpIdx] = 0;
+
+  do {
+    // If we are the first thread in the warp, check our work status
+    // and add more work if needed.
+    if (laneId == 0 && localRayCount[warpIdx] <= 0) {
+      localNextRay[warpIdx] = atomicAdd(&nextRayIndex, WARP_BATCH_SIZE);
+      localRayCount[warpIdx] = WARP_BATCH_SIZE;
+    }
+
+    // Get the next ray for this thread.
+    int rayIdx = localNextRay[warpIdx] + laneId;
+
+    bool goodThread = rayIdx < numRays;
+    if (!goodThread) break;
+
+    // Update counts and next ray to get.
+    if (laneId == 0) {
+      localNextRay[warpIdx] += WARP_SIZE;
+      localRayCount[warpIdx] -= WARP_SIZE;
+    }
+
+    ranks[rayIdx] = rayIdx;
+
+  } while (true);
+}
+
+__global__ void reorderRaysKernel(uint32_t width, bool usePitched, int numRays,
+                                  size_t rankPitch, float4* d_rays_in,
+                                  float4* d_rays_out, int* ranks,
+                                  bool direction) {
+  const uint32_t tid = threadIdx.x + blockDim.x * blockIdx.x;
+  const uint32_t warpId = tid / WARP_SIZE;       // get our warpId
+  const unsigned char laneId = tid % WARP_SIZE;  // get our warp index
+  const uint32_t warpIdx = warpId % WARPS_PER_BLOCK;
+  __shared__ volatile int localRayCount[WARPS_PER_BLOCK];
+  __shared__ volatile int localNextRay[WARPS_PER_BLOCK];
+
+  localNextRay[warpIdx] = 0;
+  localRayCount[warpIdx] = 0;
+
+  do {
+    // If we are the first thread in the warp, check our work status
+    // and add more work if needed.
+    if (laneId == 0 && localRayCount[warpIdx] <= 0) {
+      localNextRay[warpIdx] = atomicAdd(&nextRayIndex, WARP_BATCH_SIZE);
+      localRayCount[warpIdx] = WARP_BATCH_SIZE;
+    }
+
+    // Get the next ray for this thread.
+    int rayIdx = localNextRay[warpIdx] + laneId;
+
+    bool goodThread = rayIdx < numRays;
+    if (!goodThread) break;
+
+    // Update counts and next ray to get.
+    if (laneId == 0) {
+      localNextRay[warpIdx] += WARP_SIZE;
+      localRayCount[warpIdx] -= WARP_SIZE;
+    }
+
+    // If direction is true,  then we put them in sorted order of rank,
+    // so A[rank[i]] = A[i].  If direction is false, then we put the rays
+    // back in the original order, or A[i] = A[rank[i]].
+    if (direction)
+      d_rays_out[ranks[rayIdx]] = d_rays_in[rayIdx];
+    else
+      d_rays_out[rayIdx] = d_rays_in[ranks[rayIdx]];
+
+  } while (true);
+}
+
+void CUDAOctreeRenderer::sortRays(uint32_t width, uint32_t height,
+                                  bool usePitched, size_t* rankPitch,
+                                  float4* d_rays_in, float4* d_rays_out,
+                                  int** d_ranks) {
   // Get the allocation out of the way.
-  *rankInOutPitch = 2 * sizeof(int2) * width;
+  *rankPitch = 2 * sizeof(int2) * width;
   if (usePitched)
-    CHK_CUDA(cudaMallocPitch(d_rank_in_out, rankInOutPitch,
-                             width * sizeof(int2) * 2, height))
+    CHK_CUDA(cudaMallocPitch(d_ranks, rankPitch, width * sizeof(int2), height))
   else
-    CHK_CUDA(cudaMalloc(d_rank_in_out, sizeof(int2) * 2 * width * height));
+    CHK_CUDA(cudaMalloc(d_ranks, sizeof(int2) * width * height));
+
+  const size_t numRays = width * height;
+
+  // Compute warps and blocks.
+  const int numWarps = 32 * 5;
+  const uint32_t numThreadsPerBlock = THREADS_PER_BLOCK;
+  const uint32_t numBlocks = (numWarps + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;
+
+  computeRanksKernel<<<numBlocks, numThreadsPerBlock>>>(
+      width, usePitched, numRays, *rankPitch, d_rays_in, *d_ranks);
+
+  reorderRaysKernel<<<numBlocks, numThreadsPerBlock>>>(
+      width, usePitched, numRays, *rankPitch, d_rays_in, d_rays_out, *d_ranks,
+      true);
 }
 
 void CUDAOctreeRenderer::generateRays(uint32_t width, uint32_t height,
