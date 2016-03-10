@@ -53,6 +53,35 @@ texture<uint32_t, 1, cudaReadModeElementType> texture_references;
     ((i) % (width))) = x
 
 namespace oct {
+
+__device__ __inline__ void atomicMinFloat(float* ptr, float value) {
+  uint32_t curr = atomicAdd((uint32_t*)ptr, 0);
+  while (value < __int_as_float(curr)) {
+    uint32_t prev = curr;
+    curr = atomicCAS((uint32_t*)ptr, curr, __float_as_int(value));
+    if (curr == prev) break;
+  }
+}
+
+__device__ __inline__ void atomicMaxFloat(float* ptr, float value) {
+  uint32_t curr = atomicAdd((uint32_t*)ptr, 0);
+  while (value > __int_as_float(curr)) {
+    uint32_t prev = curr;
+    curr = atomicCAS((uint32_t*)ptr, curr, __float_as_int(value));
+    if (curr == prev) break;
+  }
+}
+
+__device__ __host__ inline float4 min_float4(const float4& a, const float4& b) {
+  return make_float4(min(a.x, b.x), min(a.y, b.y), min(a.z, a.z),
+                     min(a.w, b.w));
+}
+
+__device__ __host__ inline float4 max_float4(const float4& a, const float4& b) {
+  return make_float4(max(a.x, b.x), max(a.y, b.y), max(a.z, a.z),
+                     max(a.w, b.w));
+}
+
 template <uint32_t N>
 __host__ __device__ inline uint32_t lg2() {
   return ((N >> 1) != 0) + lg2<(N >> 1)>();
@@ -998,13 +1027,127 @@ __global__ void generateRaysKernel(uint32_t width, uint32_t height, float fov,
   } while (true);
 }
 
-__global__ void computeRanksKernel(uint32_t width, bool usePitched,
-                                   size_t numRays, size_t rankPitch,
-                                   float4* d_rays, int* ranks) {}
+__global__ void computeMortonCodesKernel(uint32_t width, bool usePitched,
+                                         int numRays, size_t rankPitch,
+                                         float4* rays, float4* aabb_min,
+                                         float4* aabb_max, uint4* hash) {
+  const uint32_t tid = threadIdx.x + blockDim.x * blockIdx.x;
+  const uint32_t warpId = tid / WARP_SIZE;       // get our warpId
+  const unsigned char laneId = tid % WARP_SIZE;  // get our warp index
+  const uint32_t warpIdx = warpId % WARPS_PER_BLOCK;
+  __shared__ volatile int localRayCount[WARPS_PER_BLOCK];
+  __shared__ volatile int localNextRay[WARPS_PER_BLOCK];
 
-__global__ void computeRanks(uint32_t width, bool usePitched, int numRays,
-                             size_t* rankPitch, float4* d_rays, int* ranks,
-                             bool direction) {
+  localNextRay[warpIdx] = 0;
+  localRayCount[warpIdx] = 0;
+
+  do {
+    // If we are the first thread in the warp, check our work status
+    // and add more work if needed.
+    if (laneId == 0 && localRayCount[warpIdx] <= 0) {
+      localNextRay[warpIdx] = atomicAdd(&nextRayIndex, WARP_BATCH_SIZE);
+      localRayCount[warpIdx] = WARP_BATCH_SIZE;
+    }
+
+    // Get the next ray for this thread.
+    int rayIdx = localNextRay[warpIdx] + laneId;
+
+    bool goodThread = rayIdx < numRays;
+    if (!goodThread) break;
+
+    // Update counts and next ray to get.
+    if (laneId == 0) {
+      localNextRay[warpIdx] += WARP_SIZE;
+      localRayCount[warpIdx] -= WARP_SIZE;
+    }
+
+  } while (true);
+}
+
+__global__ void findAABBKernel(uint32_t width, bool usePitched, int numRays,
+                               size_t rankPitch, float4* rays, float4* aabb_min,
+                               float4* aabb_max) {
+  const uint32_t tid = threadIdx.x + blockDim.x * blockIdx.x;
+  const uint32_t warpId = tid / WARP_SIZE;       // get our warpId
+  const unsigned char laneId = tid % WARP_SIZE;  // get our warp index
+  const uint32_t warpIdx = warpId % WARPS_PER_BLOCK;
+  __shared__ volatile int localRayCount[WARPS_PER_BLOCK];
+  __shared__ volatile int localNextRay[WARPS_PER_BLOCK];
+
+  localNextRay[warpIdx] = 0;
+  localRayCount[warpIdx] = 0;
+
+  float4 bounds_min = make_float4(NPP_MAXABS_32F, NPP_MAXABS_32F,
+                                  NPP_MAXABS_32F, NPP_MAXABS_32F);
+  float4 bounds_max = make_float4(-NPP_MAXABS_32F, -NPP_MAXABS_32F,
+                                  -NPP_MAXABS_32F, -NPP_MAXABS_32F);
+
+  do {
+    // If we are the first thread in the warp, check our work status
+    // and add more work if needed.
+    if (laneId == 0 && localRayCount[warpIdx] <= 0) {
+      localNextRay[warpIdx] = atomicAdd(&nextRayIndex, WARP_BATCH_SIZE);
+      localRayCount[warpIdx] = WARP_BATCH_SIZE;
+    }
+
+    // Get the next ray for this thread.
+    int rayIdx = localNextRay[warpIdx] + laneId;
+
+    bool goodThread = rayIdx < numRays;
+    if (!goodThread) break;
+
+    // Update counts and next ray to get.
+    if (laneId == 0) {
+      localNextRay[warpIdx] += WARP_SIZE;
+      localRayCount[warpIdx] -= WARP_SIZE;
+    }
+
+    // Update min/max values for this thread.
+    float4 origin = rays[rayIdx];
+    float4 direction = rays[rayIdx + 1];
+    float4 far_point = origin + direction * direction.w;
+    bounds_min = min_float4(min_float4(bounds_min, origin), far_point);
+    bounds_max = max_float4(max_float4(bounds_max, origin), far_point);
+
+  } while (true);
+
+  // Perform reduction within warp.
+  __shared__ float4 min_values[THREADS_PER_BLOCK];
+  __shared__ float4 max_values[THREADS_PER_BLOCK];
+  min_values[tid] = bounds_min;
+  max_values[tid] = bounds_max;
+#pragma unroll
+  for (uint32_t i = 1; i < WARP_SIZE; i *= 2) {
+    min_values[tid] = min_float4(min_values[tid], min_values[tid ^ i]);
+    max_values[tid] = max_float4(max_values[tid], max_values[tid ^ i]);
+  }
+
+// Perform reduction within block.
+#pragma unroll
+  for (uint32_t i = 0; i < lg2<WARP_FACTOR>(); ++i) {
+    __syncthreads();
+    if (tid & (WARP_SIZE << i)) {
+      min_values[tid] =
+          min_float4(min_values[tid], min_values[tid ^ (WARP_SIZE << i)]);
+      max_values[tid] =
+          max_float4(max_values[tid], max_values[tid ^ (WARP_SIZE << i)]);
+    }
+  }
+
+  // Perform globally.
+  if (tid == 0) {
+    atomicMinFloat(&aabb_min->x, min_values[tid].x);
+    atomicMinFloat(&aabb_min->y, min_values[tid].y);
+    atomicMinFloat(&aabb_min->z, min_values[tid].z);
+    atomicMaxFloat(&aabb_max->x, max_values[tid].x);
+    atomicMaxFloat(&aabb_max->y, max_values[tid].y);
+    atomicMaxFloat(&aabb_max->z, max_values[tid].z);
+  }
+}
+
+__global__ void computeRanksKernel(uint32_t width, bool usePitched, int numRays,
+                                   size_t rankPitch, float4* d_rays,
+                                   int* ranks) {
   const uint32_t tid = threadIdx.x + blockDim.x * blockIdx.x;
   const uint32_t warpId = tid / WARP_SIZE;       // get our warpId
   const unsigned char laneId = tid % WARP_SIZE;  // get our warp index
