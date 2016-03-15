@@ -1027,7 +1027,7 @@ __global__ void generateRaysKernel(uint32_t width, uint32_t height, float near,
         reinterpret_cast<float4*>(reinterpret_cast<char*>(d_rays) + pitch * y) +
         2 * x;  // Get the location to the values we are going to set.
     float3 origin = eye - near * look + eye_x * tangent + eye_y * up;
-    *pos = make_float4(origin, 0.0f);  // Set the origin.
+    *pos = make_float4(origin, near);  // Set the origin.
     float3 direction = normalize(origin - eye);
     *(pos + 1) = make_float4(direction, far);  // Set the direction.
   } while (true);
