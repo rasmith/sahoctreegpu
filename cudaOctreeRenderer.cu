@@ -1163,19 +1163,12 @@ __global__ void reorderRaysKernel(uint32_t width, bool usePitched, int numRays,
 }
 
 __inline__ bool CompareRayOrder(const RayOrder& a, const RayOrder& b) {
-  if (a.h5 < b.h5) return true;
-  if (b.h5 > a.h5) return false;
-  if (a.h4 < b.h4) return true;
-  if (b.h4 > a.h4) return false;
-  if (a.h3 < b.h3) return true;
-  if (b.h3 > a.h3) return false;
-  if (a.h2 < b.h2) return true;
-  if (b.h2 > a.h2) return false;
-  if (a.h1 < b.h1) return true;
-  if (b.h1 > a.h1) return false;
-  if (a.h0 < b.h0) return true;
-  if (b.h0 > a.h0) return false;
-  return false;
+  if (a.h5 != b.h5) return a.h5 < b.h5;
+  if (a.h4 != b.h4) return a.h4 < b.h4;
+  if (a.h3 != b.h3) return a.h3 < b.h3;
+  if (a.h2 != b.h2) return a.h2 < b.h2;
+  if (a.h1 != b.h1) return a.h1 < b.h1;
+  return a.h0 < b.h0;
 }
 
 void CUDAOctreeRenderer::sortRays(uint32_t width, uint32_t height,
@@ -1245,7 +1238,7 @@ void CUDAOctreeRenderer::sortRays(uint32_t width, uint32_t height,
   for (int i = 0; i < numRays; ++i) ray_order[i] = RayOrder(i, &hashes[6 * i]);
 
   // Sort them.
-  /*std::sort(ray_order, ray_order + numRays, CompareRayOrder);*/
+  std::sort(ray_order, ray_order + numRays, CompareRayOrder);
 
   // Reorder.
   std::vector<float4> rays_out(numRays * 2,
