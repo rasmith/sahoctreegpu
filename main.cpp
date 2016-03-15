@@ -119,8 +119,8 @@ int main(int argc, char** argv) {
       height = atoi(argv[++i]);
     } else if (arg == "--fov" && i + 1 < argc) {
       fov = atof(argv[++i]);
-    } else if (arg == "--focal_distance" && i + 1 < argc) {
-      config.focal_distance = atof(argv[++i]);
+    } else if (arg == "--near" && i + 1 < argc) {
+      config.near = atof(argv[++i]);
     } else if (arg == "--eye" && i + 1 < argc) {
       std::stringstream ss(argv[++i]);
       char dummy = 0;
@@ -163,7 +163,7 @@ int main(int argc, char** argv) {
   config.imageHeight = height;
 
   float aspect = (1.0f * width) / height;
-  float d = config.focal_distance;
+  float d = config.near;
   if (fov == -1) fov = 45.0;
 
   config.fov = fov;

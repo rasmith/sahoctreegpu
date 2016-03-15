@@ -18,7 +18,7 @@ class ConfigLoader {
         imageWidth(512),
         imageHeight(512),
         fov(45.0f),
-        focal_distance(1.0f),
+        near(1.0f),
         eye(make_float3(0.0f, 0.0f, -1.0f)),
         up(make_float3(0.0f, 1.0f, 0.0f)),
         center(make_float3(0.0f, 0.0f, 0.0f)) {}
@@ -27,7 +27,7 @@ class ConfigLoader {
   int imageWidth;
   int imageHeight;
   float fov;
-  float focal_distance;
+  float near;
   float3 eye;
   float3 up;
   float3 center;
@@ -37,7 +37,7 @@ inline std::ostream& operator<<(std::ostream& os, const ConfigLoader& config) {
   os << "objFilename = " << config.objFilename
      << " imageFilename = " << config.imageFilename
      << " width = " << config.imageWidth << " height = " << config.imageHeight
-     << " fov = " << config.fov << " focal_distance = " << config.focal_distance
+     << " fov = " << config.fov << " near = " << config.near
      << " eye = " << config.eye << " up = " << config.up
      << " center = " << config.center;
   return os;

@@ -975,7 +975,7 @@ CUDAOctreeRenderer::CUDAOctreeRenderer(const ConfigLoader& c,
 }
 
 __global__ void generateRaysKernel(uint32_t width, uint32_t height, float fov,
-                                   float focal_distance, float3 eye,
+                                   float near, float3 eye,
                                    float3 tangent, float3 up, float3 look,
                                    float4* d_rays, size_t pitch) {
   const uint32_t tid = threadIdx.x + blockDim.x * blockIdx.x;
@@ -1012,7 +1012,7 @@ __global__ void generateRaysKernel(uint32_t width, uint32_t height, float fov,
     // Compute parameters needed to get the ray direction.
     // This is done in eye coordinates.
     int y = rayIdx / width;  // Get the y coordinate in screen space.
-    float y_max = focal_distance *
+    float y_max = near *
                   tan(((M_PI / 180.0f) * fov) / 2.0f);  // Find maxiumum eye Y.
     float v = (2.0f * y) / height - 1.0f;
     float eye_y = v * y_max;  // Get eye space Y.
@@ -1026,7 +1026,7 @@ __global__ void generateRaysKernel(uint32_t width, uint32_t height, float fov,
     float4* pos =
         reinterpret_cast<float4*>(reinterpret_cast<char*>(d_rays) + pitch * y) +
         2 * x;  // Get the location to the values we are going to set.
-    float3 origin = eye - focal_distance * look + eye_x * tangent + eye_y * up;
+    float3 origin = eye - near * look + eye_x * tangent + eye_y * up;
     *pos = make_float4(origin, 0.0f);  // Set the origin.
     float3 direction = normalize(origin - eye);
     *(pos + 1) = make_float4(direction, NPP_MAXABS_32F);  // Set the direction.
@@ -1253,7 +1253,10 @@ void CUDAOctreeRenderer::sortRays(uint32_t width, uint32_t height,
   for (int i = 0; i < numRays; ++i) {
     rays_out[2 * i] = rays[2 * ray_order[i].rank_in];
     rays_out[2 * i + 1] = rays[2 * ray_order[i].rank_in + 1];
+    rays_out[2 * i] = rays[2 * i];
+    rays_out[2 * i + 1] = rays[2 * i + 1];
     ray_order[i].rank_out = i;
+    ray_order[i].rank_in = i;
   }
 
   cudaMemcpy2D(d_rays, rayPitch, &rays_out[0], 2 * width * sizeof(float4),
@@ -1261,7 +1264,7 @@ void CUDAOctreeRenderer::sortRays(uint32_t width, uint32_t height,
 }
 
 void CUDAOctreeRenderer::generateRays(uint32_t width, uint32_t height,
-                                      float focal_distance, float fov,
+                                      float near, float fov,
                                       const float3& eye, const float3& center,
                                       const float3& up, bool sort,
                                       bool usePitched, float4** d_rays,
@@ -1302,7 +1305,7 @@ void CUDAOctreeRenderer::generateRays(uint32_t width, uint32_t height,
 
   // Call our kernel.
   generateRaysKernel<<<numBlocks, numThreadsPerBlock>>>(
-      width, height, fov, focal_distance, eye, x_axis, y_axis, z_axis, *d_rays,
+      width, height, fov, near, eye, x_axis, y_axis, z_axis, *d_rays,
       *pitch);
 
   CHK_CUDA(cudaDeviceSynchronize());
@@ -1396,7 +1399,7 @@ void CUDAOctreeRenderer::traceOnDevice(int4* indices, float4* vertices) {
   bool sort = false;
   image.width = config.imageWidth;
   image.height = config.imageHeight;
-  generateRays(image.width, image.height, config.focal_distance, config.fov,
+  generateRays(image.width, image.height, config.near, config.fov,
                config.eye, config.center, config.up, sort, usePitched,
                reinterpret_cast<float4**>(&d_rays), &numRays, &rayPitch);
   std::vector<RayOrder> ray_order(numRays);
