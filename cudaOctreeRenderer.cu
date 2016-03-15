@@ -975,7 +975,7 @@ CUDAOctreeRenderer::CUDAOctreeRenderer(const ConfigLoader& c,
 }
 
 __global__ void generateRaysKernel(uint32_t width, uint32_t height, float fov,
-                                   float near, float3 eye,
+                                   float near, float far, float3 eye,
                                    float3 tangent, float3 up, float3 look,
                                    float4* d_rays, size_t pitch) {
   const uint32_t tid = threadIdx.x + blockDim.x * blockIdx.x;
@@ -1029,7 +1029,7 @@ __global__ void generateRaysKernel(uint32_t width, uint32_t height, float fov,
     float3 origin = eye - near * look + eye_x * tangent + eye_y * up;
     *pos = make_float4(origin, 0.0f);  // Set the origin.
     float3 direction = normalize(origin - eye);
-    *(pos + 1) = make_float4(direction, NPP_MAXABS_32F);  // Set the direction.
+    *(pos + 1) = make_float4(direction, far);  // Set the direction.
   } while (true);
 }
 
@@ -1264,7 +1264,7 @@ void CUDAOctreeRenderer::sortRays(uint32_t width, uint32_t height,
 }
 
 void CUDAOctreeRenderer::generateRays(uint32_t width, uint32_t height,
-                                      float near, float fov,
+                                      float near, float far, float fov,
                                       const float3& eye, const float3& center,
                                       const float3& up, bool sort,
                                       bool usePitched, float4** d_rays,
@@ -1305,7 +1305,7 @@ void CUDAOctreeRenderer::generateRays(uint32_t width, uint32_t height,
 
   // Call our kernel.
   generateRaysKernel<<<numBlocks, numThreadsPerBlock>>>(
-      width, height, fov, near, eye, x_axis, y_axis, z_axis, *d_rays,
+      width, height, fov, near, far, eye, x_axis, y_axis, z_axis, *d_rays,
       *pitch);
 
   CHK_CUDA(cudaDeviceSynchronize());
@@ -1399,7 +1399,7 @@ void CUDAOctreeRenderer::traceOnDevice(int4* indices, float4* vertices) {
   bool sort = false;
   image.width = config.imageWidth;
   image.height = config.imageHeight;
-  generateRays(image.width, image.height, config.near, config.fov,
+  generateRays(image.width, image.height, config.near, NPP_MAXABS_32F, config.fov,
                config.eye, config.center, config.up, sort, usePitched,
                reinterpret_cast<float4**>(&d_rays), &numRays, &rayPitch);
   std::vector<RayOrder> ray_order(numRays);
