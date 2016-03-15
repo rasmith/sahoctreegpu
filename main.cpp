@@ -121,6 +121,8 @@ int main(int argc, char** argv) {
       fov = atof(argv[++i]);
     } else if (arg == "--near" && i + 1 < argc) {
       config.near = atof(argv[++i]);
+    } else if (arg == "--far" && i + 1 < argc) {
+      config.far = atof(argv[++i]);
     } else if (arg == "--eye" && i + 1 < argc) {
       std::stringstream ss(argv[++i]);
       char dummy = 0;
