@@ -54,6 +54,10 @@ texture<uint32_t, 1, cudaReadModeElementType> texture_references;
 
 namespace oct {
 
+__device__ __host__ __inline__ float4 operator+(float4 v, float a) {
+  return make_float4(v.x + a, v.y + a, v.z + a, v.w + a);
+}
+
 __device__ __inline__ void atomicMinFloat(float* ptr, float value) {
   uint32_t curr = atomicAdd((uint32_t*)ptr, 0);
   while (value < __int_as_float(curr)) {
@@ -1027,10 +1031,19 @@ __global__ void generateRaysKernel(uint32_t width, uint32_t height, float fov,
   } while (true);
 }
 
-__global__ void computeMortonCodesKernel(uint32_t width, bool usePitched,
-                                         int numRays, size_t rankPitch,
-                                         float4* rays, float4* aabb_min,
-                                         float4* aabb_max, uint4* hash) {
+__host__ __device__ inline void setBits(uint32_t dimension,
+                                        uint32_t num_dimensions,
+                                        uint32_t num_bits, uint32_t value,
+                                        uint32_t* code) {
+  for (int i = 0; i < num_bits; ++i)
+    code[(num_dimensions * i + dimension) / num_bits] |=
+        (((value >> i) & 0x1) << ((num_dimensions * i + dimension) % num_bits));
+}
+
+__global__ void computeHashKernel(uint32_t width, bool usePitched, int numRays,
+                                  size_t rankPitch, float4* rays,
+                                  float4* aabb_min, float4* aabb_max,
+                                  uint4* hashes) {
   const uint32_t tid = threadIdx.x + blockDim.x * blockIdx.x;
   const uint32_t warpId = tid / WARP_SIZE;       // get our warpId
   const unsigned char laneId = tid % WARP_SIZE;  // get our warp index
@@ -1061,6 +1074,41 @@ __global__ void computeMortonCodesKernel(uint32_t width, bool usePitched,
       localRayCount[warpIdx] -= WARP_SIZE;
     }
 
+    // Get origin/direction.
+    float4 origin = rays[rayIdx];
+    float4 direction = rays[rayIdx + 1];
+
+    // Index into hash.
+    uint32_t* code = reinterpret_cast<uint32_t*>(&hashes[2 * rayIdx]);
+
+    // Get the codes.
+    const uint32_t kNumOriginBits = 24;
+    float4 aabb_origin = (origin - *aabb_min) / (*aabb_max - *aabb_min);
+    uint32_t origin_bits_x =
+        static_cast<float>(aabb_origin.x * (0x1 << kNumOriginBits));
+    uint32_t origin_bits_y =
+        static_cast<float>(aabb_origin.y * (0x1 << kNumOriginBits));
+    uint32_t origin_bits_z =
+        static_cast<float>(aabb_origin.z * (0x1 << kNumOriginBits));
+
+    // Hash the origin bits.
+    setBits(0, 6, 32, origin_bits_x, code);
+    setBits(1, 6, 32, origin_bits_y, code);
+    setBits(2, 6, 32, origin_bits_z, code);
+
+    const uint32_t kNumDirectionBits = 21;
+    float4 aabb_direction = (normalize(direction) + 1.0f) * 0.5f;
+    uint32_t direction_bits_x =
+        static_cast<float>(aabb_direction.x * (0x1 << kNumDirectionBits));
+    uint32_t direction_bits_y =
+        static_cast<float>(aabb_direction.y * (0x1 << kNumDirectionBits));
+    uint32_t direction_bits_z =
+        static_cast<float>(aabb_direction.z * (0x1 << kNumDirectionBits));
+
+    // Hash the direction bits;
+    setBits(3, 6, 32, direction_bits_x, code);
+    setBits(4, 6, 32, direction_bits_y, code);
+    setBits(5, 6, 32, direction_bits_z, code);
   } while (true);
 }
 
@@ -1146,7 +1194,7 @@ __global__ void findAABBKernel(uint32_t width, bool usePitched, int numRays,
 }
 
 __global__ void computeRanksKernel(uint32_t width, bool usePitched, int numRays,
-                                   size_t rankPitch, float4* d_rays,
+                                   size_t rankPitch, float4* d_rays_in,
                                    int* ranks) {
   const uint32_t tid = threadIdx.x + blockDim.x * blockIdx.x;
   const uint32_t warpId = tid / WARP_SIZE;       // get our warpId
@@ -1177,9 +1225,6 @@ __global__ void computeRanksKernel(uint32_t width, bool usePitched, int numRays,
       localNextRay[warpIdx] += WARP_SIZE;
       localRayCount[warpIdx] -= WARP_SIZE;
     }
-
-    ranks[rayIdx] = rayIdx;
-
   } while (true);
 }
 
@@ -1246,8 +1291,22 @@ void CUDAOctreeRenderer::sortRays(uint32_t width, uint32_t height,
   const uint32_t numThreadsPerBlock = THREADS_PER_BLOCK;
   const uint32_t numBlocks = (numWarps + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;
 
-  computeRanksKernel<<<numBlocks, numThreadsPerBlock>>>(
-      width, usePitched, numRays, *rankPitch, d_rays_in, *d_ranks);
+  float4 *d_aabb_min = NULL, *d_aabb_max = NULL;
+  CHK_CUDA(cudaMalloc(&d_aabb_min, sizeof(float4)));
+  CHK_CUDA(cudaMalloc(&d_aabb_max, sizeof(float4)));
+  findAABBKernel<<<numBlocks, numThreadsPerBlock>>>(width, usePitched, numRays,
+                                                    *rankPitch, d_rays_in,
+                                                    d_aabb_min, d_aabb_max);
+
+  uint4* d_hashes = NULL;
+  CHK_CUDA(cudaMalloc(&d_hashes, 2 * sizeof(uint4) * width * height));
+
+  computeHashKernel<<<numBlocks, numThreadsPerBlock>>>(
+      width, usePitched, numRays, *rankPitch, d_rays_in, d_aabb_min, d_aabb_max,
+      d_hashes);
+
+  /*computeRanksKernel<<<numBlocks, numThreadsPerBlock>>>(*/
+  /*width, usePitched, numRays, *rankPitch, d_rays_in, *d_ranks);*/
 
   reorderRaysKernel<<<numBlocks, numThreadsPerBlock>>>(
       width, usePitched, numRays, *rankPitch, d_rays_in, d_rays_out, *d_ranks,
