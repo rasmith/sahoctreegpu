@@ -14,6 +14,28 @@
 
 namespace oct {
 
+struct RayOrder {
+  RayOrder()
+      : rank_in(-1), rank_out(-1), h0(0), h1(0), h2(0), h3(0), h4(0), h5(0) {}
+  RayOrder(int r_in, uint32_t* hash)
+      : rank_in(r_in),
+        rank_out(-1),
+        h0(hash[0]),
+        h1(hash[1]),
+        h2(hash[2]),
+        h3(hash[3]),
+        h4(hash[4]),
+        h5(hash[5]) {}
+  int rank_in;
+  int rank_out;
+  uint32_t h0;
+  uint32_t h1;
+  uint32_t h2;
+  uint32_t h3;
+  uint32_t h4;
+  uint32_t h5;
+};
+
 struct BuildOptions {
   enum BuildOptionType {
     BUILD_ON_DEVICE,
@@ -60,8 +82,7 @@ class CUDAOctreeRenderer {
  protected:
   void loadScene();
   void sortRays(uint32_t width, uint32_t height, bool usePitched,
-                size_t* rankPitch, float4* d_rays_in, float4* d_rays_out,
-                int** d_ranks);
+                size_t rayPitch, float4* d_rays, RayOrder* ray_order);
   void generateRays(uint32_t width, uint32_t height, float focal_distance,
                     float fov, const float3& eye, const float3& center,
                     const float3& up, bool sort, bool usePitched,

@@ -1,5 +1,7 @@
 #include "cudaOctreeRenderer.h"
 
+#include <algorithm>
+
 #include <cuda.h>
 #include <cuda_runtime_api.h>
 #include <nppdefs.h>
@@ -1074,123 +1076,7 @@ __global__ void computeHashKernel(uint32_t width, bool usePitched, int numRays,
       localRayCount[warpIdx] -= WARP_SIZE;
     }
 
-    // Get origin/direction.
-    float4 origin = rays[rayIdx];
-    float4 direction = rays[rayIdx + 1];
-
-    // Index into hash.
-    uint32_t* code = reinterpret_cast<uint32_t*>(&hashes[2 * rayIdx]);
-
-    // Get the codes.
-    const uint32_t kNumOriginBits = 24;
-    float4 aabb_origin = (origin - *aabb_min) / (*aabb_max - *aabb_min);
-    uint32_t origin_bits_x =
-        static_cast<float>(aabb_origin.x * (0x1 << kNumOriginBits));
-    uint32_t origin_bits_y =
-        static_cast<float>(aabb_origin.y * (0x1 << kNumOriginBits));
-    uint32_t origin_bits_z =
-        static_cast<float>(aabb_origin.z * (0x1 << kNumOriginBits));
-
-    // Hash the origin bits.
-    setBits(0, 6, 32, origin_bits_x, code);
-    setBits(1, 6, 32, origin_bits_y, code);
-    setBits(2, 6, 32, origin_bits_z, code);
-
-    const uint32_t kNumDirectionBits = 21;
-    float4 aabb_direction = (normalize(direction) + 1.0f) * 0.5f;
-    uint32_t direction_bits_x =
-        static_cast<float>(aabb_direction.x * (0x1 << kNumDirectionBits));
-    uint32_t direction_bits_y =
-        static_cast<float>(aabb_direction.y * (0x1 << kNumDirectionBits));
-    uint32_t direction_bits_z =
-        static_cast<float>(aabb_direction.z * (0x1 << kNumDirectionBits));
-
-    // Hash the direction bits;
-    setBits(3, 6, 32, direction_bits_x, code);
-    setBits(4, 6, 32, direction_bits_y, code);
-    setBits(5, 6, 32, direction_bits_z, code);
   } while (true);
-}
-
-__global__ void findAABBKernel(uint32_t width, bool usePitched, int numRays,
-                               size_t rankPitch, float4* rays, float4* aabb_min,
-                               float4* aabb_max) {
-  const uint32_t tid = threadIdx.x + blockDim.x * blockIdx.x;
-  const uint32_t warpId = tid / WARP_SIZE;       // get our warpId
-  const unsigned char laneId = tid % WARP_SIZE;  // get our warp index
-  const uint32_t warpIdx = warpId % WARPS_PER_BLOCK;
-  __shared__ volatile int localRayCount[WARPS_PER_BLOCK];
-  __shared__ volatile int localNextRay[WARPS_PER_BLOCK];
-
-  localNextRay[warpIdx] = 0;
-  localRayCount[warpIdx] = 0;
-
-  float4 bounds_min = make_float4(NPP_MAXABS_32F, NPP_MAXABS_32F,
-                                  NPP_MAXABS_32F, NPP_MAXABS_32F);
-  float4 bounds_max = make_float4(-NPP_MAXABS_32F, -NPP_MAXABS_32F,
-                                  -NPP_MAXABS_32F, -NPP_MAXABS_32F);
-
-  do {
-    // If we are the first thread in the warp, check our work status
-    // and add more work if needed.
-    if (laneId == 0 && localRayCount[warpIdx] <= 0) {
-      localNextRay[warpIdx] = atomicAdd(&nextRayIndex, WARP_BATCH_SIZE);
-      localRayCount[warpIdx] = WARP_BATCH_SIZE;
-    }
-
-    // Get the next ray for this thread.
-    int rayIdx = localNextRay[warpIdx] + laneId;
-
-    bool goodThread = rayIdx < numRays;
-    if (!goodThread) break;
-
-    // Update counts and next ray to get.
-    if (laneId == 0) {
-      localNextRay[warpIdx] += WARP_SIZE;
-      localRayCount[warpIdx] -= WARP_SIZE;
-    }
-
-    // Update min/max values for this thread.
-    float4 origin = rays[rayIdx];
-    float4 direction = rays[rayIdx + 1];
-    float4 far_point = origin + direction * direction.w;
-    bounds_min = min_float4(min_float4(bounds_min, origin), far_point);
-    bounds_max = max_float4(max_float4(bounds_max, origin), far_point);
-
-  } while (true);
-
-  // Perform reduction within warp.
-  __shared__ float4 min_values[THREADS_PER_BLOCK];
-  __shared__ float4 max_values[THREADS_PER_BLOCK];
-  min_values[tid] = bounds_min;
-  max_values[tid] = bounds_max;
-#pragma unroll
-  for (uint32_t i = 1; i < WARP_SIZE; i *= 2) {
-    min_values[tid] = min_float4(min_values[tid], min_values[tid ^ i]);
-    max_values[tid] = max_float4(max_values[tid], max_values[tid ^ i]);
-  }
-
-// Perform reduction within block.
-#pragma unroll
-  for (uint32_t i = 0; i < lg2<WARP_FACTOR>(); ++i) {
-    __syncthreads();
-    if (tid & (WARP_SIZE << i)) {
-      min_values[tid] =
-          min_float4(min_values[tid], min_values[tid ^ (WARP_SIZE << i)]);
-      max_values[tid] =
-          max_float4(max_values[tid], max_values[tid ^ (WARP_SIZE << i)]);
-    }
-  }
-
-  // Perform globally.
-  if (tid == 0) {
-    atomicMinFloat(&aabb_min->x, min_values[tid].x);
-    atomicMinFloat(&aabb_min->y, min_values[tid].y);
-    atomicMinFloat(&aabb_min->z, min_values[tid].z);
-    atomicMaxFloat(&aabb_max->x, max_values[tid].x);
-    atomicMaxFloat(&aabb_max->y, max_values[tid].y);
-    atomicMaxFloat(&aabb_max->z, max_values[tid].z);
-  }
 }
 
 __global__ void computeRanksKernel(uint32_t width, bool usePitched, int numRays,
@@ -1225,6 +1111,9 @@ __global__ void computeRanksKernel(uint32_t width, bool usePitched, int numRays,
       localNextRay[warpIdx] += WARP_SIZE;
       localRayCount[warpIdx] -= WARP_SIZE;
     }
+
+    ranks[rayIdx] = rayIdx;
+
   } while (true);
 }
 
@@ -1273,44 +1162,102 @@ __global__ void reorderRaysKernel(uint32_t width, bool usePitched, int numRays,
   } while (true);
 }
 
-void CUDAOctreeRenderer::sortRays(uint32_t width, uint32_t height,
-                                  bool usePitched, size_t* rankPitch,
-                                  float4* d_rays_in, float4* d_rays_out,
-                                  int** d_ranks) {
-  // Get the allocation out of the way.
-  *rankPitch = 2 * sizeof(int2) * width;
-  if (usePitched)
-    CHK_CUDA(cudaMallocPitch(d_ranks, rankPitch, width * sizeof(int2), height))
-  else
-    CHK_CUDA(cudaMalloc(d_ranks, sizeof(int2) * width * height));
+__inline__ bool CompareRayOrder(const RayOrder& a, const RayOrder& b) {
+  if (a.h5 < b.h5) return true;
+  if (b.h5 > a.h5) return false;
+  if (a.h4 < b.h4) return true;
+  if (b.h4 > a.h4) return false;
+  if (a.h3 < b.h3) return true;
+  if (b.h3 > a.h3) return false;
+  if (a.h2 < b.h2) return true;
+  if (b.h2 > a.h2) return false;
+  if (a.h1 < b.h1) return true;
+  if (b.h1 > a.h1) return false;
+  if (a.h0 < b.h0) return true;
+  if (b.h0 > a.h0) return false;
+  return false;
+}
 
+void CUDAOctreeRenderer::sortRays(uint32_t width, uint32_t height,
+                                  bool usePitched, size_t rayPitch,
+                                  float4* d_rays, RayOrder* ray_order) {
   const size_t numRays = width * height;
 
-  // Compute warps and blocks.
-  const int numWarps = 32 * 5;
-  const uint32_t numThreadsPerBlock = THREADS_PER_BLOCK;
-  const uint32_t numBlocks = (numWarps + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;
+  // Copy rays from GPU.
+  std::vector<float4> rays(2 * numRays, make_float4(0.0f, 0.0f, 0.0f, 0.0f));
+  CHK_CUDA(cudaMemcpy2D(&rays[0], width * 2 * sizeof(float4), d_rays, rayPitch,
+                        width, height, cudaMemcpyDeviceToHost));
 
-  float4 *d_aabb_min = NULL, *d_aabb_max = NULL;
-  CHK_CUDA(cudaMalloc(&d_aabb_min, sizeof(float4)));
-  CHK_CUDA(cudaMalloc(&d_aabb_max, sizeof(float4)));
-  findAABBKernel<<<numBlocks, numThreadsPerBlock>>>(width, usePitched, numRays,
-                                                    *rankPitch, d_rays_in,
-                                                    d_aabb_min, d_aabb_max);
+  // Find the AABB.
+  float4 bounds_min = make_float4(NPP_MAXABS_32F, NPP_MAXABS_32F,
+                                  NPP_MAXABS_32F, NPP_MAXABS_32F);
+  float4 bounds_max = make_float4(-NPP_MAXABS_32F, -NPP_MAXABS_32F,
+                                  -NPP_MAXABS_32F, -NPP_MAXABS_32F);
+  for (int i = 0; i < numRays; ++i) {
+    float4 origin = rays[2 * i];
+    float4 direction = rays[2 * i + 1];
+    float4 far_point = origin + direction * direction.w;
+    bounds_min = min_float4(min_float4(bounds_min, origin), far_point);
+    bounds_max = max_float4(max_float4(bounds_max, origin), far_point);
+  }
 
-  uint4* d_hashes = NULL;
-  CHK_CUDA(cudaMalloc(&d_hashes, 2 * sizeof(uint4) * width * height));
+  // Compute the hashes.
+  std::vector<uint32_t> hashes(numRays * 6, 0);
+  for (int i = 0; i < numRays; ++i) {
+    // Get origin/direction.
+    float4 origin = rays[2 * i];
+    float4 direction = rays[2 * i + 1];
 
-  computeHashKernel<<<numBlocks, numThreadsPerBlock>>>(
-      width, usePitched, numRays, *rankPitch, d_rays_in, d_aabb_min, d_aabb_max,
-      d_hashes);
+    // Index into hash.
+    uint32_t* code = &hashes[6 * i];
 
-  /*computeRanksKernel<<<numBlocks, numThreadsPerBlock>>>(*/
-  /*width, usePitched, numRays, *rankPitch, d_rays_in, *d_ranks);*/
+    // Get the codes.
+    const uint32_t kNumOriginBits = 24;
+    float4 aabb_origin = (origin - bounds_min) / (bounds_max - bounds_min);
+    uint32_t origin_bits_x =
+        static_cast<float>(aabb_origin.x * (0x1 << kNumOriginBits));
+    uint32_t origin_bits_y =
+        static_cast<float>(aabb_origin.y * (0x1 << kNumOriginBits));
+    uint32_t origin_bits_z =
+        static_cast<float>(aabb_origin.z * (0x1 << kNumOriginBits));
 
-  reorderRaysKernel<<<numBlocks, numThreadsPerBlock>>>(
-      width, usePitched, numRays, *rankPitch, d_rays_in, d_rays_out, *d_ranks,
-      true);
+    // Hash the origin bits.
+    setBits(0, 6, 32, origin_bits_x, code);
+    setBits(1, 6, 32, origin_bits_y, code);
+    setBits(2, 6, 32, origin_bits_z, code);
+
+    const uint32_t kNumDirectionBits = 21;
+    float4 aabb_direction = (normalize(direction) + 1.0f) * 0.5f;
+    uint32_t direction_bits_x =
+        static_cast<float>(aabb_direction.x * (0x1 << kNumDirectionBits));
+    uint32_t direction_bits_y =
+        static_cast<float>(aabb_direction.y * (0x1 << kNumDirectionBits));
+    uint32_t direction_bits_z =
+        static_cast<float>(aabb_direction.z * (0x1 << kNumDirectionBits));
+
+    // Hash the direction bits;
+    setBits(3, 6, 32, direction_bits_x, code);
+    setBits(4, 6, 32, direction_bits_y, code);
+    setBits(5, 6, 32, direction_bits_z, code);
+  }
+
+  // Remember the original order.
+  for (int i = 0; i < numRays; ++i) ray_order[i] = RayOrder(i, &hashes[6 * i]);
+
+  // Sort them.
+  std::sort(ray_order, ray_order + numRays, CompareRayOrder);
+
+  // Reorder.
+  std::vector<float4> rays_out(numRays * 2,
+                               make_float4(0.0f, 0.0f, 0.0f, 0.0f));
+  for (int i = 0; i < numRays; ++i) {
+    rays_out[2 * i] = rays[2 * ray_order[i].rank_in];
+    rays_out[2 * i + 1] = rays[2 * ray_order[i].rank_in + 1];
+    ray_order[i].rank_out = i;
+  }
+
+  cudaMemcpy2D(d_rays, rayPitch, &rays_out[0], 2 * width * sizeof(float4),
+               width, height, cudaMemcpyHostToDevice);
 }
 
 void CUDAOctreeRenderer::generateRays(uint32_t width, uint32_t height,
@@ -1452,6 +1399,9 @@ void CUDAOctreeRenderer::traceOnDevice(int4* indices, float4* vertices) {
   generateRays(image.width, image.height, config.focal_distance, config.fov,
                config.eye, config.center, config.up, sort, usePitched,
                reinterpret_cast<float4**>(&d_rays), &numRays, &rayPitch);
+  std::vector<RayOrder> ray_order(numRays);
+  sortRays(image.width, image.height, usePitched, rayPitch,
+           reinterpret_cast<float4*>(d_rays), &ray_order[0]);
 
   // Allocate hits for results.
   size_t hitPitch = image.width * sizeof(Hit);
@@ -1566,14 +1516,18 @@ void CUDAOctreeRenderer::traceOnDevice(int4* indices, float4* vertices) {
 #endif
 
   // Copy hits locally.
+  std::vector<Hit> tempHits(numRays);
   localHits.resize(numRays);
   if (usePitched)
-    CHK_CUDA(cudaMemcpy2D(&localHits[0], hitPitch, d_hits,
+    CHK_CUDA(cudaMemcpy2D(&tempHits[0], hitPitch, d_hits,
                           sizeof(Hit) * image.width, sizeof(Hit) * image.width,
                           image.height, cudaMemcpyDeviceToHost))
   else
-    CHK_CUDA(cudaMemcpy(&localHits[0], d_hits, sizeof(Hit) * numRays,
+    CHK_CUDA(cudaMemcpy(&tempHits[0], d_hits, sizeof(Hit) * numRays,
                         cudaMemcpyDeviceToHost));
+
+  for (int i = 0; i < numRays; ++i)
+    localHits[ray_order[i].rank_in] = tempHits[ray_order[i].rank_out];
 
   CHK_CUDA(cudaFree(d_hits));
   CHK_CUDA(cudaFree(d_rays));
