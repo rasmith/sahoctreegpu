@@ -1095,8 +1095,8 @@ void CUDAOctreeRenderer::sortRays(uint32_t width, uint32_t height,
     bounds_max = max_float4(max_float4(bounds_max, origin), far_point);
   }
 
-  LOG(DEBUG) << "bounds_min = " << bounds_min << " bounds_max = " << bounds_max
-             << "\n";
+  /*LOG(DEBUG) << "bounds_min = " << bounds_min << " bounds_max = " << bounds_max*/
+             /*<< "\n";*/
 
   // Compute the hashes.
   std::vector<uint32_t> hashes(numRays * 6, 0);
@@ -1137,28 +1137,28 @@ void CUDAOctreeRenderer::sortRays(uint32_t width, uint32_t height,
     setBits(4, 6, 32, direction_bits_y, code);
     setBits(5, 6, 32, direction_bits_z, code);
 
-    if (i < 10) {
-      LOG(DEBUG) << "          origin[" << i << "] = " << origin << "\n";
-      LOG(DEBUG) << "       direction[" << i << "] = " << direction << "\n";
-      LOG(DEBUG) << "     aabb_origin[" << i << "] = " << aabb_origin << "\n";
-      LOG(DEBUG) << "  aabb_direction[" << i << "] = " << aabb_direction
-                 << "\n";
-      LOG(DEBUG) << "   origin_bits_x[" << i
-                 << "] = " << UInt32ToBitString(origin_bits_x) << "\n";
-      LOG(DEBUG) << "   origin_bits_y[" << i
-                 << "] = " << UInt32ToBitString(origin_bits_y) << "\n";
-      LOG(DEBUG) << "   origin_bits_z[" << i
-                 << "] = " << UInt32ToBitString(origin_bits_z) << "\n";
-      LOG(DEBUG) << "direction_bits_x[" << i
-                 << "] = " << UInt32ToBitString(direction_bits_x) << "\n";
-      LOG(DEBUG) << "direction_bits_y[" << i
-                 << "] = " << UInt32ToBitString(direction_bits_y) << "\n";
-      LOG(DEBUG) << "direction_bits_z[" << i
-                 << "] = " << UInt32ToBitString(direction_bits_z) << "\n";
-      LOG(DEBUG) << "       direction[" << i << "] = " << direction << "\n";
-      LOG(DEBUG) << "          hashes[" << i
-                 << "] = " << HashToString(&hashes[6 * i]) << "\n";
-    }
+    /*if (i < 10) {*/
+      /*LOG(DEBUG) << "          origin[" << i << "] = " << origin << "\n";*/
+      /*LOG(DEBUG) << "       direction[" << i << "] = " << direction << "\n";*/
+      /*LOG(DEBUG) << "     aabb_origin[" << i << "] = " << aabb_origin << "\n";*/
+      /*LOG(DEBUG) << "  aabb_direction[" << i << "] = " << aabb_direction*/
+                 /*<< "\n";*/
+      /*LOG(DEBUG) << "   origin_bits_x[" << i*/
+                 /*<< "] = " << UInt32ToBitString(origin_bits_x) << "\n";*/
+      /*LOG(DEBUG) << "   origin_bits_y[" << i*/
+                 /*<< "] = " << UInt32ToBitString(origin_bits_y) << "\n";*/
+      /*LOG(DEBUG) << "   origin_bits_z[" << i*/
+                 /*<< "] = " << UInt32ToBitString(origin_bits_z) << "\n";*/
+      /*LOG(DEBUG) << "direction_bits_x[" << i*/
+                 /*<< "] = " << UInt32ToBitString(direction_bits_x) << "\n";*/
+      /*LOG(DEBUG) << "direction_bits_y[" << i*/
+                 /*<< "] = " << UInt32ToBitString(direction_bits_y) << "\n";*/
+      /*LOG(DEBUG) << "direction_bits_z[" << i*/
+                 /*<< "] = " << UInt32ToBitString(direction_bits_z) << "\n";*/
+      /*LOG(DEBUG) << "       direction[" << i << "] = " << direction << "\n";*/
+      /*LOG(DEBUG) << "          hashes[" << i*/
+                 /*<< "] = " << HashToString(&hashes[6 * i]) << "\n";*/
+    /*}*/
   }
 
   // Remember the original order.
@@ -1207,10 +1207,6 @@ void CUDAOctreeRenderer::sortRays(uint32_t width, uint32_t height,
     int in = ray_order[i].rank_in;
     rays_out[2 * out] = rays[2 * in];
     rays_out[2 * out + 1] = rays[2 * in + 1];
-    /*rays_out[2 * i] = rays[2 * i];*/
-    /*rays_out[2 * i + 1] = rays[2 * i + 1];*/
-    /*ray_order[i].rank_in = ray_order[i].rank_in;*/
-    /*ray_order[i].rank_in = i;*/
   }
 
   if (usePitched)
