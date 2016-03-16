@@ -26,6 +26,25 @@ struct RayOrder {
         h3(hash[3]),
         h4(hash[4]),
         h5(hash[5]) {}
+
+
+  inline int HashEquals(const RayOrder& o) const {
+    return (h5 == o.h5 && h4 == o.h4 && h3 == o.h3 && h2 ==  o.h2
+      && h1 == o.h1 && h0 == o.h0);
+  }
+
+  inline bool operator<(const RayOrder& o) const {
+    if (this == &o) return false;
+    if (h5 != o.h5) return h5 < o.h5;
+    if (h4 != o.h4) return h4 < o.h4;
+    if (h3 != o.h3) return h3 < o.h3;
+    if (h2 != o.h2) return h2 < o.h2;
+    if (h1 != o.h1) return h1 < o.h1;
+    if (h0 != o.h0) return h0 < o.h0;
+    if (rank_in != o.rank_in) return rank_in < o.rank_in;
+    return false;
+  }
+
   int rank_in;
   int rank_out;
   uint32_t h0;

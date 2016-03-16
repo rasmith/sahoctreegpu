@@ -1,6 +1,9 @@
 #include "cudaOctreeRenderer.h"
 
 #include <algorithm>
+#include <iomanip>
+#include <bitset>
+#include <string>
 
 #include <cuda.h>
 #include <cuda_runtime_api.h>
@@ -39,6 +42,8 @@ texture<float4, 1, cudaReadModeElementType> texture_vertices;
 texture<int4, 1, cudaReadModeElementType> texture_indices;
 texture<uint32_t, 1, cudaReadModeElementType> texture_references;
 
+#ifdef USE_PITCHED
+const bool kUsePitched = true;
 #define GET_RAY_ORIGIN(rays, width, pitch, i)                               \
   *(reinterpret_cast<const float4*>(reinterpret_cast<const char*>((rays)) + \
                                     ((i) / (width)) * (pitch)) +            \
@@ -53,7 +58,12 @@ texture<uint32_t, 1, cudaReadModeElementType> texture_references;
   *(reinterpret_cast<Hit*>(reinterpret_cast<char*>((hits)) + \
                            ((i) / (width)) * (pitch)) +      \
     ((i) % (width))) = x
-
+#else
+const bool kUsePitched = false;
+#define GET_RAY_ORIGIN(rays, width, pitch, i) (rays)[2 * (i)]
+#define GET_RAY_DIRECTION(rays, width, pitch, i) (rays)[2 * (i) + 1]
+#define SET_HIT(hits, width, pitch, i, x) (hits)[(i)] = (x)
+#endif
 namespace oct {
 
 __device__ __host__ __inline__ float4 operator+(float4 v, float a) {
@@ -79,12 +89,12 @@ __device__ __inline__ void atomicMaxFloat(float* ptr, float value) {
 }
 
 __device__ __host__ inline float4 min_float4(const float4& a, const float4& b) {
-  return make_float4(min(a.x, b.x), min(a.y, b.y), min(a.z, a.z),
+  return make_float4(min(a.x, b.x), min(a.y, b.y), min(a.z, b.z),
                      min(a.w, b.w));
 }
 
 __device__ __host__ inline float4 max_float4(const float4& a, const float4& b) {
-  return make_float4(max(a.x, b.x), max(a.y, b.y), max(a.z, a.z),
+  return make_float4(max(a.x, b.x), max(a.y, b.y), max(a.z, b.z),
                      max(a.w, b.w));
 }
 
@@ -1027,7 +1037,7 @@ __global__ void generateRaysKernel(uint32_t width, uint32_t height, float near,
         reinterpret_cast<float4*>(reinterpret_cast<char*>(d_rays) + pitch * y) +
         2 * x;  // Get the location to the values we are going to set.
     float3 origin = eye - near * look + eye_x * tangent + eye_y * up;
-    *pos = make_float4(origin, near);  // Set the origin.
+    *pos = make_float4(origin, 0.0f);  // Set the origin.
     float3 direction = normalize(origin - eye);
     *(pos + 1) = make_float4(direction, far);  // Set the direction.
   } while (true);
@@ -1162,13 +1172,18 @@ __global__ void reorderRaysKernel(uint32_t width, bool usePitched, int numRays,
   } while (true);
 }
 
-__inline__ bool CompareRayOrder(const RayOrder& a, const RayOrder& b) {
-  if (a.h5 != b.h5) return a.h5 < b.h5;
-  if (a.h4 != b.h4) return a.h4 < b.h4;
-  if (a.h3 != b.h3) return a.h3 < b.h3;
-  if (a.h2 != b.h2) return a.h2 < b.h2;
-  if (a.h1 != b.h1) return a.h1 < b.h1;
-  return a.h0 < b.h0;
+std::string UInt32ToBitString(uint32_t i) {
+  std::bitset<32> x(i);
+  return x.to_string();
+}
+
+std::string HashToString(uint32_t* hash) {
+  std::string result = "";
+  for (int i = 5; i >= 0; --i) {
+    std::bitset<32> x(hash[i]);
+    result += " " + x.to_string();
+  }
+  return result;
 }
 
 void CUDAOctreeRenderer::sortRays(uint32_t width, uint32_t height,
@@ -1178,8 +1193,12 @@ void CUDAOctreeRenderer::sortRays(uint32_t width, uint32_t height,
 
   // Copy rays from GPU.
   std::vector<float4> rays(2 * numRays, make_float4(0.0f, 0.0f, 0.0f, 0.0f));
-  CHK_CUDA(cudaMemcpy2D(&rays[0], width * 2 * sizeof(float4), d_rays, rayPitch,
-                        width, height, cudaMemcpyDeviceToHost));
+  if (usePitched)
+    CHK_CUDA(cudaMemcpy2D(&rays[0], width * 2 * sizeof(float4), d_rays,
+                          rayPitch, width, height, cudaMemcpyDeviceToHost))
+  else
+    CHK_CUDA(cudaMemcpy(&rays[0], d_rays, sizeof(float4) * 2 * numRays,
+                        cudaMemcpyDeviceToHost));
 
   // Find the AABB.
   float4 bounds_min = make_float4(NPP_MAXABS_32F, NPP_MAXABS_32F,
@@ -1193,6 +1212,9 @@ void CUDAOctreeRenderer::sortRays(uint32_t width, uint32_t height,
     bounds_min = min_float4(min_float4(bounds_min, origin), far_point);
     bounds_max = max_float4(max_float4(bounds_max, origin), far_point);
   }
+
+  LOG(DEBUG) << "bounds_min = " << bounds_min << " bounds_max = " << bounds_max
+             << "\n";
 
   // Compute the hashes.
   std::vector<uint32_t> hashes(numRays * 6, 0);
@@ -1232,28 +1254,90 @@ void CUDAOctreeRenderer::sortRays(uint32_t width, uint32_t height,
     setBits(3, 6, 32, direction_bits_x, code);
     setBits(4, 6, 32, direction_bits_y, code);
     setBits(5, 6, 32, direction_bits_z, code);
+
+    if (i < 10) {
+      LOG(DEBUG) << "          origin[" << i << "] = " << origin << "\n";
+      LOG(DEBUG) << "       direction[" << i << "] = " << direction << "\n";
+      LOG(DEBUG) << "     aabb_origin[" << i << "] = " << aabb_origin << "\n";
+      LOG(DEBUG) << "  aabb_direction[" << i << "] = " << aabb_direction
+                 << "\n";
+      LOG(DEBUG) << "   origin_bits_x[" << i
+                 << "] = " << UInt32ToBitString(origin_bits_x) << "\n";
+      LOG(DEBUG) << "   origin_bits_y[" << i
+                 << "] = " << UInt32ToBitString(origin_bits_y) << "\n";
+      LOG(DEBUG) << "   origin_bits_z[" << i
+                 << "] = " << UInt32ToBitString(origin_bits_z) << "\n";
+      LOG(DEBUG) << "direction_bits_x[" << i
+                 << "] = " << UInt32ToBitString(direction_bits_x) << "\n";
+      LOG(DEBUG) << "direction_bits_y[" << i
+                 << "] = " << UInt32ToBitString(direction_bits_y) << "\n";
+      LOG(DEBUG) << "direction_bits_z[" << i
+                 << "] = " << UInt32ToBitString(direction_bits_z) << "\n";
+      LOG(DEBUG) << "       direction[" << i << "] = " << direction << "\n";
+      LOG(DEBUG) << "          hashes[" << i
+                 << "] = " << HashToString(&hashes[6 * i]) << "\n";
+    }
   }
 
   // Remember the original order.
   for (int i = 0; i < numRays; ++i) ray_order[i] = RayOrder(i, &hashes[6 * i]);
 
   // Sort them.
-  std::sort(ray_order, ray_order + numRays, CompareRayOrder);
+  std::sort(ray_order, ray_order + numRays);
+
+  /*int count = 0;*/
+  /*int num_printed = 0;*/
+  /*for (int i = 0; i < numRays; ++i) {*/
+  /*if (i > 0) {*/
+  /*if (ray_order[i].HashEquals(ray_order[i - 1]))*/
+  /*++count;*/
+  /*else {*/
+  /*if (num_printed < 10) {*/
+  /*std::cout << std::dec << ray_order[i - 1].h5 << " ";*/
+  /*std::cout << std::dec << ray_order[i - 1].h4 << " ";*/
+  /*std::cout << std::dec << ray_order[i - 1].h3 << " ";*/
+  /*std::cout << std::dec << ray_order[i - 1].h2 << " ";*/
+  /*std::cout << std::dec << ray_order[i - 1].h1 << " ";*/
+  /*std::cout << std::dec << ray_order[i - 1].h0;*/
+  /*std::cout << std::dec << " [" << count << "]\n";*/
+  /*++num_printed;*/
+  /*}*/
+  /*count = 0;*/
+  /*}*/
+  /*}*/
+  /*}*/
+  /*if (num_printed < 10) {*/
+  /*std::cout << std::dec << ray_order[numRays - 1].h5 << " ";*/
+  /*std::cout << std::dec << ray_order[numRays - 1].h4 << " ";*/
+  /*std::cout << std::dec << ray_order[numRays - 1].h3 << " ";*/
+  /*std::cout << std::dec << ray_order[numRays - 1].h2 << " ";*/
+  /*std::cout << std::dec << ray_order[numRays - 1].h1 << " ";*/
+  /*std::cout << std::dec << ray_order[numRays - 1].h0;*/
+  /*std::cout << std::dec << " [" << count << "]\n";*/
+  /*}*/
 
   // Reorder.
   std::vector<float4> rays_out(numRays * 2,
                                make_float4(0.0f, 0.0f, 0.0f, 0.0f));
   for (int i = 0; i < numRays; ++i) {
-    rays_out[2 * i] = rays[2 * ray_order[i].rank_in];
-    rays_out[2 * i + 1] = rays[2 * ray_order[i].rank_in + 1];
-    rays_out[2 * i] = rays[2 * i];
-    rays_out[2 * i + 1] = rays[2 * i + 1];
     ray_order[i].rank_out = i;
-    ray_order[i].rank_in = i;
+    int out = ray_order[i].rank_out;
+    int in = ray_order[i].rank_in;
+    rays_out[2 * out] = rays[2 * in];
+    rays_out[2 * out + 1] = rays[2 * in + 1];
+    /*rays_out[2 * i] = rays[2 * i];*/
+    /*rays_out[2 * i + 1] = rays[2 * i + 1];*/
+    /*ray_order[i].rank_in = ray_order[i].rank_in;*/
+    /*ray_order[i].rank_in = i;*/
   }
 
-  CHK_CUDA(cudaMemcpy2D(d_rays, rayPitch, &rays_out[0], 2 * width * sizeof(float4),
-               width, height, cudaMemcpyHostToDevice));
+  if (usePitched)
+    CHK_CUDA(cudaMemcpy2D(d_rays, rayPitch, &rays_out[0],
+                          2 * width * sizeof(float4), width, height,
+                          cudaMemcpyHostToDevice))
+  else
+    CHK_CUDA(cudaMemcpy(d_rays, &rays_out[0], 2 * sizeof(float4) * numRays,
+                        cudaMemcpyHostToDevice));
 }
 
 void CUDAOctreeRenderer::generateRays(uint32_t width, uint32_t height,
@@ -1388,7 +1472,7 @@ void CUDAOctreeRenderer::traceOnDevice(int4* indices, float4* vertices) {
 
   // Generate rays.
   size_t rayPitch = image.width * sizeof(float4) * 2;
-  bool usePitched = true;
+  bool usePitched = kUsePitched;
   bool sort = false;
   image.width = config.imageWidth;
   image.height = config.imageHeight;
@@ -1405,7 +1489,7 @@ void CUDAOctreeRenderer::traceOnDevice(int4* indices, float4* vertices) {
     CHK_CUDA(cudaMallocPitch(&d_hits, &hitPitch, sizeof(Hit) * image.width,
                              image.height))
   else
-    CHK_CUDA(cudaMalloc(&d_hits, sizeof(Ray) * image.width * image.height));
+    CHK_CUDA(cudaMalloc(&d_hits, sizeof(Hit) * image.width * image.height));
 
   std::vector<Hit> initialHits(numRays);
   const Hit badHit = {0.0f, -1, 0.0f, 0.0f};
@@ -1524,7 +1608,7 @@ void CUDAOctreeRenderer::traceOnDevice(int4* indices, float4* vertices) {
                         cudaMemcpyDeviceToHost));
 
   for (int i = 0; i < numRays; ++i)
-    localHits[ray_order[i].rank_in] = tempHits[ray_order[i].rank_out];
+    localHits[ray_order[i].rank_in] = tempHits[i];
 
   CHK_CUDA(cudaFree(d_hits));
   CHK_CUDA(cudaFree(d_rays));
